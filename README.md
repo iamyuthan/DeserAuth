@@ -38,16 +38,20 @@ Many enterprise Java thick-client applications embed user identity (USERID, acco
 
 ## Features
 
-<img width="1874" height="574" alt="image" src="https://github.com/user-attachments/assets/9f9941e2-1540-40a3-b213-f5368fe74b8c" />
-
 
 ### Passive Automatic Analysis
+
+<img width="1874" height="574" alt="image" src="https://github.com/user-attachments/assets/9f9941e2-1540-40a3-b213-f5368fe74b8c" />
+
 - Intercepts all matching requests across selected Burp tools
 - Automatically replays with modified serialized values
 - Compares original vs modified responses
 - Color-codes results: 🟢 SAME | 🟡 SIMILAR | 🔴 DIFFERENT
 
 ###️ Manual Right-Click Actions
+
+<img width="972" height="593" alt="image" src="https://github.com/user-attachments/assets/de66f823-fda1-4207-b033-2321aaa0a711" />
+
 - **Send to Repeater (Same Length)** - fast direct replacement
 - **Send to Repeater (Any Length)** - patches length prefixes automatically
 - **Send to Repeater (Batch)** - comma-separated payloads, one tab per payload
