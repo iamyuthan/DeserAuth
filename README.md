@@ -224,7 +224,7 @@ char[] Array (StringBuilder internal):
 ```
 ┌────────────┬──────┬──────┬──────┬──────┬──────┬──────┐
 │ 4-byte     │ \x00 │ \x00 │ \x00 │ \x00 │ \x00 │ \x00 │
-│ array size │  L   │  1   │  7   │  3   │ \x00 │ \x00 │ ← null padding
+│ array size │  I   │  D   │  0   │  1   │ \x00 │ \x00 │ ← null padding
 └────────────┴──────┴──────┴──────┴──────┴──────┴──────┘
 ↑ UTF-16BE chars ↑     ↑ available space ↑
 ```
