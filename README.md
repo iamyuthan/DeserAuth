@@ -187,7 +187,8 @@ Tests if deserialized values reach sinks without sanitization.
 
 ### Architecture
 
-┌──────────────────────────────────────────────────────────┐
+```
+┌──────────────────────────────────────────────────────────┐
 │                  DeserAuth Extension                     │
 ├──────────────────────────┬───────────────────────────────┤
 │   IHttpListener          │   IContextMenuFactory         │
@@ -207,23 +208,26 @@ Tests if deserialized values reach sinks without sanitization.
 │   3. TC_STRING length prefix patching (2-byte)           │
 │   4. ASCII fallback replacement                          │
 └──────────────────────────────────────────────────────────┘
-
+```
 
 ### Serialized String Storage in Java
 
 Standard TC_STRING:
+```
 ┌──────┬──────────┬─────────────────┐
 │ 0x74 │ 2-byte   │ UTF-8 string    │
 │      │ length   │ bytes           │
 └──────┴──────────┴─────────────────┘
+```
 
 char[] Array (StringBuilder internal):
+```
 ┌────────────┬──────┬──────┬──────┬──────┬──────┬──────┐
 │ 4-byte     │ \x00 │ \x00 │ \x00 │ \x00 │ \x00 │ \x00 │
 │ array size │  L   │  1   │  7   │  3   │ \x00 │ \x00 │ ← null padding
 └────────────┴──────┴──────┴──────┴──────┴──────┴──────┘
 ↑ UTF-16BE chars ↑     ↑ available space ↑
-
+```
 
 DeserAuth handles both formats automatically.
 
