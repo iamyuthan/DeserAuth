@@ -413,6 +413,8 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IMessageEditorController,
     def build_ui(self):
         self._main_panel = JPanel(BorderLayout(5, 5))
         self._main_panel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10))
+        
+        self._parent_frame = SwingUtilities.getWindowAncestor(self._main_panel)
 
         config_panel = JPanel(BorderLayout(5, 5))
 
@@ -691,11 +693,11 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IMessageEditorController,
         if messages is None or len(messages) == 0:
             return
 
-        search = JOptionPane.showInputDialog(None, "Search string:", "DeserAuth", JOptionPane.PLAIN_MESSAGE)
+        search = JOptionPane.showInputDialog(self._parent_frame, "Search string:", "DeserAuth", JOptionPane.PLAIN_MESSAGE)
         if search is None or len(str(search)) == 0:
             return
 
-        replace = JOptionPane.showInputDialog(None, "Replace string:", "DeserAuth", JOptionPane.PLAIN_MESSAGE)
+        replace = JOptionPane.showInputDialog(self._parent_frame, "Replace string:", "DeserAuth", JOptionPane.PLAIN_MESSAGE)
         if replace is None:
             return
 
@@ -703,7 +705,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IMessageEditorController,
         replace = str(replace)
 
         if mode == "same" and len(search) != len(replace):
-            JOptionPane.showMessageDialog(None,
+            JOptionPane.showMessageDialog(self._parent_frame,
                 "Same Length mode requires equal lengths.\nSearch=%d, Replace=%d" % (len(search), len(replace)),
                 "DeserAuth", JOptionPane.WARNING_MESSAGE)
             return
@@ -736,7 +738,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IMessageEditorController,
         if messages is None or len(messages) == 0:
             return
 
-        search = JOptionPane.showInputDialog(None, "Search string:", "DeserAuth Batch", JOptionPane.PLAIN_MESSAGE)
+        search = JOptionPane.showInputDialog(self._parent_frame, "Search string:", "DeserAuth Batch", JOptionPane.PLAIN_MESSAGE)
         if search is None or len(str(search)) == 0:
             return
         search = str(search)
@@ -817,7 +819,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IMessageEditorController,
         else:
             rules = self.get_active_rules()
             if not rules:
-                JOptionPane.showMessageDialog(None,
+                JOptionPane.showMessageDialog(self._parent_frame,
                     "Add at least one enabled rule with a search value.",
                     "No Rules", JOptionPane.WARNING_MESSAGE)
                 return
@@ -1054,7 +1056,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IMessageEditorController,
     def show_export_dialog(self):
         log = self._table_model.getLog()
         if not log:
-            JOptionPane.showMessageDialog(None, "No data to export.", "Export", JOptionPane.INFORMATION_MESSAGE)
+            JOptionPane.showMessageDialog(self._parent_frame, "No data to export.", "Export", JOptionPane.INFORMATION_MESSAGE)
             return
 
         export_panel = JPanel()
@@ -1106,7 +1108,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IMessageEditorController,
         format_combo = JComboBox(["CSV", "HTML", "XML", "Excel (HTML)"])
         export_panel.add(format_combo)
 
-        result = JOptionPane.showConfirmDialog(None, export_panel, "DeserAuth - Export Options",
+        result = JOptionPane.showConfirmDialog(self._parent_frame, export_panel, "DeserAuth - Export Options",
                                                JOptionPane.OK_CANCEL_OPTION)
         if result != JOptionPane.OK_OPTION:
             return
@@ -1150,7 +1152,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IMessageEditorController,
             fields.append("mod_response_body")
 
         if not fields:
-            JOptionPane.showMessageDialog(None, "Select at least one field.", "Export", JOptionPane.WARNING_MESSAGE)
+            JOptionPane.showMessageDialog(self._parent_frame, "Select at least one field.", "Export", JOptionPane.WARNING_MESSAGE)
             return
 
         fmt = format_combo.getSelectedIndex()
@@ -1179,12 +1181,12 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IMessageEditorController,
             elif fmt == 3:
                 self._export_excel_html(filepath, log, fields)
 
-            JOptionPane.showMessageDialog(None,
+            JOptionPane.showMessageDialog(self._parent_frame,
                 "Exported %d entries to:\n%s" % (len(log), filepath),
                 "Export Complete", JOptionPane.INFORMATION_MESSAGE)
             print("[+] Exported %d entries to %s" % (len(log), filepath))
         except Exception as e:
-            JOptionPane.showMessageDialog(None,
+            JOptionPane.showMessageDialog(self._parent_frame,
                 "Export failed: %s" % str(e),
                 "Error", JOptionPane.ERROR_MESSAGE)
             print("[!] Export error: %s" % str(e))
