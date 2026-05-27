@@ -17,7 +17,7 @@
 
 ## Overview
 
-**DeserAuth** is a Burp Suite extension purpose-built for testing **authorization and access control** in applications that communicate using **Java serialized objects** — such as Spring HTTP Invoker, RMI over HTTP, WebLogic T3, and custom binary protocols.
+**DeserAuth** is a Burp Suite extension purpose-built for testing **authorization and access control** in applications that communicate using **Java serialized objects** - such as Spring HTTP Invoker, RMI over HTTP, WebLogic T3, and custom binary protocols.
 
 Many enterprise Java thick-client applications embed user identity (USERID, account numbers, session tokens) directly inside serialized request bodies. Traditional Burp tools like Auth Analyzer don't understand binary serialization formats. **DeserAuth bridges that gap.**
 
@@ -42,16 +42,16 @@ Many enterprise Java thick-client applications embed user identity (USERID, acco
 - Color-codes results: 🟢 SAME | 🟡 SIMILAR | 🔴 DIFFERENT
 
 ###️ Manual Right-Click Actions
-- **Send to Repeater (Same Length)** — fast direct replacement
-- **Send to Repeater (Any Length)** — patches length prefixes automatically
-- **Send to Repeater (Batch)** — comma-separated payloads, one tab per payload
-- **Send to Repeater using Saved Rule** — apply pre-configured rules instantly
+- **Send to Repeater (Same Length)** - fast direct replacement
+- **Send to Repeater (Any Length)** - patches length prefixes automatically
+- **Send to Repeater (Batch)** - comma-separated payloads, one tab per payload
+- **Send to Repeater using Saved Rule** - apply pre-configured rules instantly
 
 ### Smart Serialization Handling
-- **Java `char[]` buffers** — overwrites null-padding or expands buffer + patches array size
-- **TC_STRING format** — auto-patches 2-byte length prefix
-- **UTF-16BE encoding** — handles Java's internal string representation
-- **ASCII strings** — catches method names and plain-text fields
+- **Java `char[]` buffers** - overwrites null-padding or expands buffer + patches array size
+- **TC_STRING format** - auto-patches 2-byte length prefix
+- **UTF-16BE encoding** - handles Java's internal string representation
+- **ASCII strings** - catches method names and plain-text fields
 
 ### Results & Reporting
 - Sortable results table (click column headers)
@@ -73,7 +73,7 @@ Works across all Burp tools:
 | Requirement | Details |
 |-------------|---------|
 | Burp Suite | Professional or Community Edition |
-| Jython | Standalone JAR (2.7.x) — [Download](https://www.jython.org/download) |
+| Jython | Standalone JAR (2.7.x) - [Download](https://www.jython.org/download) |
 
 ### Steps
 
@@ -106,13 +106,13 @@ Extender → Add → Extension Type: Python → Select deserauth.py
 - Replace: `User2` (target user ID)
 - Mode: Any Length
 
-2. **Select Scope** — choose which Burp tools to monitor
+2. **Select Scope** - choose which Burp tools to monitor
 
 3. **Click START**
 
-4. **Use the application normally** — browse, click, perform actions
+4. **Use the application normally** - browse, click, perform actions
 
-5. **Watch the results table** — DIFFERENT entries indicate potential authorization bypass
+5. **Watch the results table** - DIFFERENT entries indicate potential authorization bypass
 
 6. **Click any row** to inspect the full original vs modified request/response
 
@@ -255,10 +255,10 @@ DeserAuth handles both formats automatically.
 | Issue | Solution |
 |-------|----------|
 | Extension won't load | Ensure Jython standalone JAR is set in Extender → Options |
-| `ZipException: zip END header not found` | You selected "Java" extension type — change to "Python" |
-| `NameError: global name 'X' is not defined` | Missing import — check Jython console output |
+| `ZipException: zip END header not found` | You selected "Java" extension type - change to "Python" |
+| `NameError: global name 'X' is not defined` | Missing import - check Jython console output |
 | No entries appearing in table | Verify: rules have search values, scope is correct, START is clicked |
-| Export fails with encoding error | Fixed in v1.2 — binary bodies are sanitized before export |
+| Export fails with encoding error | Fixed in v1.2 - binary bodies are sanitized before export |
 
 ---
 
