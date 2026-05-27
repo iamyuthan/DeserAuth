@@ -60,6 +60,7 @@ from java.util import ArrayList
 from threading import Thread, Lock
 from java.awt.event import MouseAdapter
 from java.awt import Cursor
+from burp import IExtensionStateListener
 import java.awt.Desktop as Desktop
 import java.net.URI as URI
 import time
@@ -389,7 +390,7 @@ class ManualBatchAction(ActionListener):
     def actionPerformed(self, event):
         self.extender.context_send_to_repeater_batch(self.invocation)
 
-class BurpExtender(IBurpExtender, ITab, IHttpListener, IMessageEditorController, IContextMenuFactory):
+class BurpExtender(IBurpExtender, ITab, IHttpListener, IMessageEditorController, IContextMenuFactory, IExtensionStateListener):
 
     def registerExtenderCallbacks(self, callbacks):
         self._callbacks = callbacks
@@ -401,7 +402,13 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IMessageEditorController,
         self._lock = Lock()
         self._repeater_counter = 0
 
+        callbacks.registerExtensionStateListener(self)
+        
         SwingUtilities.invokeLater(BuildUIRunnable(self))
+        
+    def extensionUnloaded(self):
+        self._running = False
+        print("[+] DeserAuth unloaded cleanly")
 
     def build_ui(self):
         self._main_panel = JPanel(BorderLayout(5, 5))
