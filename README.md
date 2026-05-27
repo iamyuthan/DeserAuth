@@ -19,6 +19,9 @@
 
 **DeserAuth** is a Burp Suite extension purpose-built for testing **authorization and access control** in applications that communicate using **Java serialized objects**, such as Spring HTTP Invoker, RMI over HTTP, WebLogic T3, and custom binary protocols.
 
+<img width="1913" height="938" alt="image" src="https://github.com/user-attachments/assets/9f3a1468-64f9-407a-ae83-9ac86e16e29a" />
+
+
 Many enterprise Java thick-client applications embed user identity (USERID, account numbers, session tokens) directly inside serialized request bodies. Traditional Burp tools like Auth Analyzer don't understand binary serialization formats. **DeserAuth bridges that gap.**
 
 ### The Problem It Solves
@@ -34,6 +37,9 @@ Many enterprise Java thick-client applications embed user identity (USERID, acco
 ---
 
 ## Features
+
+<img width="1874" height="574" alt="image" src="https://github.com/user-attachments/assets/9f9941e2-1540-40a3-b213-f5368fe74b8c" />
+
 
 ### Passive Automatic Analysis
 - Intercepts all matching requests across selected Burp tools
