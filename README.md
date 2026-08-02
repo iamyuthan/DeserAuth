@@ -72,6 +72,10 @@ Example output:
       (String) = "en_AU"
 ```
 
+<img width="498" height="263" alt="image" src="https://github.com/user-attachments/assets/37d0025e-bd4f-4cb7-89d2-a484189c3739" />
+<img width="354" height="328" alt="image" src="https://github.com/user-attachments/assets/7e383355-b640-4df8-9ccb-e16a96db91b7" />
+
+
 ---
 
 ## Features
