@@ -1,5 +1,5 @@
 # ==============================================================
-#  DeserAuth v1.2 - Deserialization Authorization Analyzer
+#  DeserAuth v2.0 - Deserialization Authorization Analyzer
 #  
 #  Automated Java Serialization Manipulation & Authorization
 #  Testing for Burp Suite
@@ -18,6 +18,7 @@
 #    escalation, IDOR, and broken access control vulnerabilities.
 #
 #  Features:
+#    - Deserialized message editor tab (live decode/edit like JWT)
 #    - Passive automatic analysis (intercept & compare)
 #    - Manual right-click Send-to-Repeater mutations
 #    - Same-length and variable-length serialized string swapping
@@ -43,12 +44,13 @@
 #
 # ==============================================================
 
-from burp import IBurpExtender, ITab, IHttpListener, IMessageEditorController, IContextMenuFactory
+from burp import IBurpExtender, ITab, IHttpListener, IMessageEditorController, IContextMenuFactory, IMessageEditorTabFactory, IMessageEditorTab
 from javax.swing import (JPanel, JButton, JTable, JScrollPane, JLabel,
                          JTextField, JCheckBox, JComboBox, JSplitPane,
                          JTabbedPane, BoxLayout, Box, BorderFactory,
                          SwingConstants, JOptionPane, SwingUtilities,
-                         ListSelectionModel, JFileChooser, JMenu, JMenuItem)
+                         ListSelectionModel, JFileChooser, JMenu, JMenuItem,
+                         JTextArea)
 from javax.swing.table import AbstractTableModel, DefaultTableCellRenderer, TableRowSorter
 from javax.swing.filechooser import FileNameExtensionFilter
 from javax.swing.event import ListSelectionListener
@@ -64,6 +66,7 @@ from burp import IExtensionStateListener
 import java.awt.Desktop as Desktop
 import java.net.URI as URI
 import time
+import struct
 
 class SwapRule:
     def __init__(self, search="", replace="", mode="any", enabled=True):
@@ -390,7 +393,1077 @@ class ManualBatchAction(ActionListener):
     def actionPerformed(self, event):
         self.extender.context_send_to_repeater_batch(self.invocation)
 
-class BurpExtender(IBurpExtender, ITab, IHttpListener, IMessageEditorController, IContextMenuFactory, IExtensionStateListener):
+# ================================================================
+#  Java Serialization Stream Parser & Deserialized Editor Tab
+# ================================================================
+
+class SerialNode(object):
+    def __init__(self, node_type, offset=-1):
+        self.node_type = node_type
+        self.offset = offset
+        self.end_offset = -1
+        self.value = None
+        self.value_offset = -1
+        self.value_length = 0
+        self.type_code = None
+        self.class_name = None
+        self.field_name = None
+        self.fields = []
+        self.elements = []
+        self.serial_uid = 0
+        self.handle = -1
+        self.encoding = None
+        self.flags = 0
+        self.super_desc = None
+        self.field_descs = []
+
+
+class JavaSerialParser(object):
+
+    TC_NULL = 0x70
+    TC_REFERENCE = 0x71
+    TC_CLASSDESC = 0x72
+    TC_OBJECT = 0x73
+    TC_STRING = 0x74
+    TC_ARRAY = 0x75
+    TC_CLASS = 0x76
+    TC_BLOCKDATA = 0x77
+    TC_ENDBLOCKDATA = 0x78
+    TC_RESET = 0x79
+    TC_BLOCKDATALONG = 0x7A
+    TC_EXCEPTION = 0x7B
+    TC_LONGSTRING = 0x7C
+    TC_PROXYCLASSDESC = 0x7D
+    TC_ENUM = 0x7E
+
+    SC_WRITE_METHOD = 0x01
+    SC_SERIALIZABLE = 0x02
+    SC_EXTERNALIZABLE = 0x04
+    SC_BLOCK_DATA = 0x08
+
+    HANDLE_BASE = 0x7E0000
+
+    def __init__(self, data):
+        self.data = data
+        self.pos = 0
+        self.handles = []
+        self.error_msg = None
+
+    def _rb(self):
+        if self.pos >= len(self.data):
+            raise Exception("EOF at %d" % self.pos)
+        b = ord(self.data[self.pos])
+        self.pos += 1
+        return b
+
+    def _rn(self, n):
+        if self.pos + n > len(self.data):
+            raise Exception("EOF at %d need %d" % (self.pos, n))
+        r = self.data[self.pos:self.pos + n]
+        self.pos += n
+        return r
+
+    def _ru16(self):
+        return (self._rb() << 8) | self._rb()
+
+    def _ri32(self):
+        v = (self._rb() << 24) | (self._rb() << 16) | (self._rb() << 8) | self._rb()
+        if v >= 0x80000000:
+            v -= 0x100000000
+        return v
+
+    def _ri64(self):
+        hi = self._ri32() & 0xFFFFFFFF
+        lo = self._ri32() & 0xFFFFFFFF
+        v = (hi << 32) | lo
+        if v >= 0x8000000000000000:
+            v -= 0x10000000000000000
+        return v
+
+    def _rf32(self):
+        try:
+            return struct.unpack('>f', self._rn(4))[0]
+        except:
+            return 0.0
+
+    def _rf64(self):
+        try:
+            return struct.unpack('>d', self._rn(8))[0]
+        except:
+            return 0.0
+
+    def _rutf(self):
+        length = self._ru16()
+        raw = self._rn(length)
+        try:
+            return raw.decode('utf-8') if isinstance(raw, bytes) else raw
+        except:
+            return raw
+
+    def _nh(self, node):
+        node.handle = self.HANDLE_BASE + len(self.handles)
+        self.handles.append(node)
+        return node.handle
+
+    def _gh(self, hv):
+        idx = hv - self.HANDLE_BASE
+        if 0 <= idx < len(self.handles):
+            return self.handles[idx]
+        return None
+
+    def parse(self):
+        if len(self.data) < 4:
+            return None
+        magic = (ord(self.data[0]) << 8) | ord(self.data[1])
+        if magic != 0xACED:
+            return None
+        self.pos = 4
+        nodes = []
+        try:
+            while self.pos < len(self.data):
+                node = self._read_content()
+                if node is not None:
+                    nodes.append(node)
+        except Exception as e:
+            self.error_msg = "Parse stopped at offset %d: %s" % (self.pos, str(e))
+        return nodes
+
+    def _read_content(self):
+        tc = self._rb()
+        return self._read_tc(tc)
+
+    def _read_tc(self, tc):
+        if tc == self.TC_OBJECT:
+            return self._read_object()
+        elif tc == self.TC_CLASSDESC:
+            return self._read_classdesc()
+        elif tc == self.TC_PROXYCLASSDESC:
+            return self._read_proxy_classdesc()
+        elif tc == self.TC_STRING:
+            return self._read_string()
+        elif tc == self.TC_LONGSTRING:
+            return self._read_longstring()
+        elif tc == self.TC_ARRAY:
+            return self._read_array()
+        elif tc == self.TC_NULL:
+            n = SerialNode("null", self.pos - 1)
+            n.value = None
+            return n
+        elif tc == self.TC_REFERENCE:
+            return self._read_reference()
+        elif tc == self.TC_BLOCKDATA:
+            return self._read_blockdata()
+        elif tc == self.TC_BLOCKDATALONG:
+            return self._read_blockdata_long()
+        elif tc == self.TC_ENDBLOCKDATA:
+            return None
+        elif tc == self.TC_CLASS:
+            return self._read_class()
+        elif tc == self.TC_ENUM:
+            return self._read_enum()
+        elif tc == self.TC_RESET:
+            self.handles = []
+            return None
+        else:
+            raise Exception("Unknown TC: 0x%02X" % tc)
+
+    def _read_string(self):
+        offset = self.pos - 1
+        val_offset = self.pos + 2
+        value = self._rutf()
+        n = SerialNode("string", offset)
+        n.value = value
+        n.value_offset = val_offset
+        n.value_length = len(value) if isinstance(value, str) else 0
+        n.encoding = "tc_string"
+        n.end_offset = self.pos
+        self._nh(n)
+        return n
+
+    def _read_longstring(self):
+        offset = self.pos - 1
+        val_offset = self.pos + 8
+        length = self._ri64()
+        value = self._rn(int(length))
+        n = SerialNode("string", offset)
+        n.value = value
+        n.value_offset = val_offset
+        n.value_length = int(length)
+        n.encoding = "tc_longstring"
+        n.end_offset = self.pos
+        self._nh(n)
+        return n
+
+    def _read_reference(self):
+        handle = self._ri32()
+        ref_node = self._gh(handle)
+        n = SerialNode("reference", self.pos - 5)
+        n.handle = handle
+        if ref_node:
+            n.value = ref_node
+            n.class_name = getattr(ref_node, 'class_name', None)
+        return n
+
+    def _read_blockdata(self):
+        offset = self.pos - 1
+        length = self._rb()
+        data = self._rn(length)
+        n = SerialNode("blockdata", offset)
+        hx = " ".join("%02X" % ord(c) for c in data[:64])
+        if length > 64:
+            hx += " ..."
+        n.value = hx
+        n.value_length = length
+        n.end_offset = self.pos
+        return n
+
+    def _read_blockdata_long(self):
+        offset = self.pos - 1
+        length = self._ri32()
+        data = self._rn(length)
+        n = SerialNode("blockdata", offset)
+        hx = " ".join("%02X" % ord(c) for c in data[:64])
+        if length > 64:
+            hx += " ..."
+        n.value = hx
+        n.value_length = length
+        n.end_offset = self.pos
+        return n
+
+    def _read_classdesc(self):
+        offset = self.pos - 1
+        class_name = self._rutf()
+        serial_uid = self._ri64()
+        n = SerialNode("classdesc", offset)
+        n.class_name = class_name
+        n.serial_uid = serial_uid
+        self._nh(n)
+        flags = self._rb()
+        n.flags = flags
+        fc = self._ru16()
+        n.field_descs = []
+        for _ in range(fc):
+            n.field_descs.append(self._read_field_desc())
+        self._skip_annotations()
+        tc = self._rb()
+        if tc == self.TC_CLASSDESC:
+            n.super_desc = self._read_classdesc()
+        elif tc == self.TC_PROXYCLASSDESC:
+            n.super_desc = self._read_proxy_classdesc()
+        elif tc == self.TC_REFERENCE:
+            n.super_desc = self._gh(self._ri32())
+        else:
+            n.super_desc = None
+        n.end_offset = self.pos
+        return n
+
+    def _read_proxy_classdesc(self):
+        offset = self.pos - 1
+        ic = self._ri32()
+        ifaces = []
+        for _ in range(ic):
+            ifaces.append(self._rutf())
+        n = SerialNode("classdesc", offset)
+        n.class_name = "Proxy[%s]" % ", ".join(ifaces)
+        self._nh(n)
+        self._skip_annotations()
+        tc = self._rb()
+        if tc == self.TC_CLASSDESC:
+            n.super_desc = self._read_classdesc()
+        elif tc == self.TC_PROXYCLASSDESC:
+            n.super_desc = self._read_proxy_classdesc()
+        elif tc == self.TC_REFERENCE:
+            n.super_desc = self._gh(self._ri32())
+        else:
+            n.super_desc = None
+        n.flags = 0
+        n.field_descs = []
+        n.end_offset = self.pos
+        return n
+
+    def _skip_annotations(self):
+        while True:
+            tc = self._rb()
+            if tc == self.TC_ENDBLOCKDATA:
+                return
+            self._read_tc(tc)
+
+    def _read_field_desc(self):
+        tc = chr(self._rb())
+        name = self._rutf()
+        cn = None
+        if tc in ('L', '['):
+            t = self._rb()
+            if t == self.TC_STRING:
+                cn = self._rutf()
+                sn = SerialNode("string")
+                sn.value = cn
+                self._nh(sn)
+            elif t == self.TC_REFERENCE:
+                ref = self._gh(self._ri32())
+                if ref:
+                    cn = getattr(ref, 'value', None) or getattr(ref, 'class_name', None)
+        return {'type': tc, 'name': name, 'class_name': cn}
+
+    def _read_object(self):
+        offset = self.pos - 1
+        tc = self._rb()
+        if tc == self.TC_CLASSDESC:
+            cd = self._read_classdesc()
+        elif tc == self.TC_PROXYCLASSDESC:
+            cd = self._read_proxy_classdesc()
+        elif tc == self.TC_REFERENCE:
+            cd = self._gh(self._ri32())
+        elif tc == self.TC_NULL:
+            cd = None
+        else:
+            raise Exception("Expected classdesc, got 0x%02X" % tc)
+        n = SerialNode("object", offset)
+        n.class_name = getattr(cd, 'class_name', 'Unknown') if cd else 'Unknown'
+        self._nh(n)
+        chain = []
+        d = cd
+        while d is not None:
+            chain.insert(0, d)
+            d = getattr(d, 'super_desc', None)
+        for d in chain:
+            fl = getattr(d, 'flags', 0)
+            fds = getattr(d, 'field_descs', [])
+            if fl & self.SC_SERIALIZABLE:
+                for fd in fds:
+                    child = self._read_field_value(fd)
+                    if child:
+                        n.fields.append(child)
+                if fl & self.SC_WRITE_METHOD:
+                    self._read_obj_annotations(n)
+            elif fl & self.SC_EXTERNALIZABLE:
+                if fl & self.SC_BLOCK_DATA:
+                    self._read_obj_annotations(n)
+        n.end_offset = self.pos
+        return n
+
+    def _read_obj_annotations(self, parent):
+        while True:
+            tc = self._rb()
+            if tc == self.TC_ENDBLOCKDATA:
+                return
+            child = self._read_tc(tc)
+            if child:
+                parent.elements.append(child)
+
+    def _read_field_value(self, fd):
+        tc = fd['type']
+        offset = self.pos
+        n = SerialNode("field", offset)
+        n.field_name = fd['name']
+        n.type_code = tc
+        if tc == 'B':
+            n.value = self._rb()
+            n.value_offset = offset
+            n.value_length = 1
+        elif tc == 'C':
+            v = self._ru16()
+            n.value = chr(v) if 32 <= v < 127 else v
+            n.value_offset = offset
+            n.value_length = 2
+        elif tc == 'D':
+            n.value = self._rf64()
+            n.value_offset = offset
+            n.value_length = 8
+        elif tc == 'F':
+            n.value = self._rf32()
+            n.value_offset = offset
+            n.value_length = 4
+        elif tc == 'I':
+            n.value = self._ri32()
+            n.value_offset = offset
+            n.value_length = 4
+        elif tc == 'J':
+            n.value = self._ri64()
+            n.value_offset = offset
+            n.value_length = 8
+        elif tc == 'S':
+            v = self._ru16()
+            if v >= 0x8000:
+                v -= 0x10000
+            n.value = v
+            n.value_offset = offset
+            n.value_length = 2
+        elif tc == 'Z':
+            n.value = self._rb() != 0
+            n.value_offset = offset
+            n.value_length = 1
+        elif tc in ('L', '['):
+            t = self._rb()
+            if t == self.TC_NULL:
+                n.value = None
+                n.node_type = "null_field"
+            elif t == self.TC_REFERENCE:
+                ref = self._gh(self._ri32())
+                n.node_type = "ref_field"
+                n.value = ref
+            else:
+                child = self._read_tc(t)
+                if child:
+                    if child.node_type == "string":
+                        n.value = child.value
+                        n.node_type = "string_field"
+                        n.value_offset = child.value_offset
+                        n.value_length = child.value_length
+                        n.encoding = child.encoding
+                    elif child.node_type == "array":
+                        n.node_type = "array_field"
+                        n.value = child
+                    else:
+                        n.node_type = "object_field"
+                        n.value = child
+        n.end_offset = self.pos
+        return n
+
+    def _read_array(self):
+        offset = self.pos - 1
+        tc = self._rb()
+        if tc == self.TC_CLASSDESC:
+            cd = self._read_classdesc()
+        elif tc == self.TC_REFERENCE:
+            cd = self._gh(self._ri32())
+        elif tc == self.TC_NULL:
+            cd = None
+        else:
+            raise Exception("Expected array classdesc, got 0x%02X" % tc)
+        n = SerialNode("array", offset)
+        self._nh(n)
+        size = self._ri32()
+        cn = getattr(cd, 'class_name', '') if cd else ''
+        n.class_name = cn
+        et = cn[1] if len(cn) > 1 and cn.startswith('[') else '?'
+        if et == 'C':
+            vo = self.pos
+            raw = self._rn(size * 2)
+            chars = []
+            for i in range(0, len(raw), 2):
+                code = (ord(raw[i]) << 8) | ord(raw[i + 1])
+                if code == 0:
+                    break
+                chars.append(chr(code) if code < 128 else '?')
+            n.value = ''.join(chars)
+            n.value_offset = vo
+            n.value_length = size * 2
+            n.encoding = "char_array"
+        elif et == 'B':
+            vo = self.pos
+            raw = self._rn(size)
+            n.value_offset = vo
+            n.value_length = size
+            hx = " ".join("%02X" % ord(c) for c in raw[:128])
+            if size > 128:
+                hx += " ... (%d total)" % size
+            n.value = hx
+        elif et == 'I':
+            for i in range(min(size, 200)):
+                v = self._ri32()
+                c = SerialNode("int", self.pos - 4)
+                c.value = v
+                c.field_name = "[%d]" % i
+                c.value_offset = self.pos - 4
+                c.value_length = 4
+                n.elements.append(c)
+            if size > 200:
+                self._rn((size - 200) * 4)
+        elif et == 'J':
+            for i in range(min(size, 200)):
+                v = self._ri64()
+                c = SerialNode("long", self.pos - 8)
+                c.value = v
+                c.field_name = "[%d]" % i
+                n.elements.append(c)
+            if size > 200:
+                self._rn((size - 200) * 8)
+        elif et == 'S':
+            for i in range(min(size, 200)):
+                v = self._ru16()
+                c = SerialNode("short", self.pos - 2)
+                c.value = v
+                c.field_name = "[%d]" % i
+                n.elements.append(c)
+            if size > 200:
+                self._rn((size - 200) * 2)
+        elif et == 'Z':
+            for i in range(min(size, 200)):
+                v = self._rb()
+                c = SerialNode("boolean", self.pos - 1)
+                c.value = v != 0
+                c.field_name = "[%d]" % i
+                n.elements.append(c)
+            if size > 200:
+                self._rn(size - 200)
+        elif et == 'F':
+            for i in range(min(size, 200)):
+                v = self._rf32()
+                c = SerialNode("float", self.pos - 4)
+                c.value = v
+                c.field_name = "[%d]" % i
+                n.elements.append(c)
+            if size > 200:
+                self._rn((size - 200) * 4)
+        elif et == 'D':
+            for i in range(min(size, 200)):
+                v = self._rf64()
+                c = SerialNode("double", self.pos - 8)
+                c.value = v
+                c.field_name = "[%d]" % i
+                n.elements.append(c)
+            if size > 200:
+                self._rn((size - 200) * 8)
+        elif et in ('L', '['):
+            for i in range(min(size, 200)):
+                t = self._rb()
+                child = self._read_tc(t)
+                if child:
+                    child.field_name = "[%d]" % i
+                    n.elements.append(child)
+            # cannot skip remaining unknown-size objects
+        else:
+            for i in range(min(size, 50)):
+                try:
+                    t = self._rb()
+                    child = self._read_tc(t)
+                    if child:
+                        child.field_name = "[%d]" % i
+                        n.elements.append(child)
+                except:
+                    break
+        n.end_offset = self.pos
+        return n
+
+    def _read_class(self):
+        tc = self._rb()
+        if tc == self.TC_CLASSDESC:
+            desc = self._read_classdesc()
+        elif tc == self.TC_REFERENCE:
+            desc = self._gh(self._ri32())
+        elif tc == self.TC_NULL:
+            desc = None
+        else:
+            desc = None
+        n = SerialNode("class", self.pos)
+        n.value = getattr(desc, 'class_name', 'null') if desc else 'null'
+        self._nh(n)
+        return n
+
+    def _read_enum(self):
+        offset = self.pos - 1
+        tc = self._rb()
+        if tc == self.TC_CLASSDESC:
+            cd = self._read_classdesc()
+        elif tc == self.TC_REFERENCE:
+            cd = self._gh(self._ri32())
+        elif tc == self.TC_NULL:
+            cd = None
+        else:
+            cd = None
+        n = SerialNode("enum", offset)
+        self._nh(n)
+        tc2 = self._rb()
+        name_n = self._read_tc(tc2)
+        ec = getattr(cd, 'class_name', 'Enum') if cd else 'Enum'
+        ev = getattr(name_n, 'value', '?') if name_n else '?'
+        n.class_name = ec
+        n.value = "%s.%s" % (ec, ev)
+        n.end_offset = self.pos
+        return n
+
+
+class JavaSerialFormatter(object):
+
+    def __init__(self):
+        self.lines = []
+        self.editables = []
+
+    def format(self, nodes, error_msg=None):
+        self.lines = []
+        self.editables = []
+        self.lines.append("=== Deserialized Java Object Stream ===")
+        self.lines.append("")
+        for node in nodes:
+            self._fmt_node(node, 0)
+        if error_msg:
+            self.lines.append("")
+            self.lines.append("[!] " + error_msg)
+        return "\n".join(self.lines), self.editables
+
+    def _ind(self, level):
+        return "  " * level
+
+    def _add_ed(self, value, node):
+        self.editables.append((len(self.lines), value, node))
+
+    def _esc(self, s):
+        if s is None:
+            return "null"
+        s = str(s)
+        return s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+
+    def _fmt_node(self, node, indent):
+        if node is None:
+            return
+        nt = node.node_type
+        if nt == "object":
+            self._fmt_obj(node, indent)
+        elif nt == "string":
+            self._add_ed(node.value, node)
+            self.lines.append('%s(String) = "%s"' % (self._ind(indent), self._esc(node.value)))
+        elif nt == "array":
+            self._fmt_arr(node, indent)
+        elif nt == "null":
+            self.lines.append("%snull" % self._ind(indent))
+        elif nt == "reference":
+            ref = node.value
+            if ref and hasattr(ref, 'class_name') and ref.class_name:
+                self.lines.append("%s@ref -> %s" % (self._ind(indent), ref.class_name))
+            elif ref and hasattr(ref, 'value') and ref.value is not None:
+                self.lines.append('%s@ref -> "%s"' % (self._ind(indent), self._esc(str(ref.value))))
+            else:
+                self.lines.append("%s@ref(0x%08X)" % (self._ind(indent), node.handle))
+        elif nt == "blockdata":
+            self.lines.append("%s[BlockData: %d bytes] %s" % (self._ind(indent), node.value_length, node.value))
+        elif nt == "enum":
+            self.lines.append("%s[Enum] %s" % (self._ind(indent), node.value))
+        elif nt == "class":
+            self.lines.append("%s[Class] %s" % (self._ind(indent), node.value))
+        elif nt == "classdesc":
+            self.lines.append("%s[ClassDesc] %s" % (self._ind(indent), node.class_name))
+        elif nt in ("field", "string_field", "array_field", "object_field", "null_field", "ref_field"):
+            self._fmt_field(node, indent)
+        else:
+            self.lines.append("%s[%s]" % (self._ind(indent), nt))
+
+    def _fmt_obj(self, node, indent):
+        self.lines.append("%s[Object] %s" % (self._ind(indent), node.class_name))
+        for field in node.fields:
+            self._fmt_field(field, indent + 1)
+        if node.elements:
+            for elem in node.elements:
+                self._fmt_node(elem, indent + 1)
+
+    def _fmt_field(self, node, indent):
+        name = node.field_name or "?"
+        tc = node.type_code or ""
+        nt = node.node_type
+        tl = {'B': 'byte', 'C': 'char', 'D': 'double', 'F': 'float',
+              'I': 'int', 'J': 'long', 'S': 'short', 'Z': 'boolean'}
+        if nt == "string_field":
+            self._add_ed(node.value, node)
+            self.lines.append('%s%s (String) = "%s"' % (self._ind(indent), name, self._esc(node.value)))
+        elif nt == "null_field":
+            self.lines.append("%s%s = null" % (self._ind(indent), name))
+        elif nt == "ref_field":
+            ref = node.value
+            if ref and hasattr(ref, 'class_name') and ref.class_name:
+                self.lines.append("%s%s = @ref -> %s" % (self._ind(indent), name, ref.class_name))
+            elif ref and hasattr(ref, 'value') and ref.value is not None:
+                self.lines.append('%s%s = @ref -> "%s"' % (self._ind(indent), name, self._esc(str(ref.value))))
+            else:
+                self.lines.append("%s%s = @ref" % (self._ind(indent), name))
+        elif nt == "array_field":
+            child = node.value
+            if child and child.encoding == "char_array":
+                self._add_ed(child.value, child)
+                self.lines.append('%s%s (char[]) = "%s"' % (self._ind(indent), name, self._esc(child.value or "")))
+            elif child:
+                self.lines.append("%s%s:" % (self._ind(indent), name))
+                self._fmt_arr(child, indent + 1)
+            else:
+                self.lines.append("%s%s = []" % (self._ind(indent), name))
+        elif nt == "object_field":
+            child = node.value
+            if child:
+                self.lines.append("%s%s:" % (self._ind(indent), name))
+                self._fmt_node(child, indent + 1)
+            else:
+                self.lines.append("%s%s = <object>" % (self._ind(indent), name))
+        elif tc == 'Z':
+            self._add_ed(node.value, node)
+            self.lines.append("%s%s (boolean) = %s" % (self._ind(indent), name, "true" if node.value else "false"))
+        elif tc in tl:
+            self._add_ed(node.value, node)
+            self.lines.append("%s%s (%s) = %s" % (self._ind(indent), name, tl[tc], str(node.value)))
+        else:
+            if isinstance(node.value, str):
+                self._add_ed(node.value, node)
+                self.lines.append('%s%s = "%s"' % (self._ind(indent), name, self._esc(node.value)))
+            elif node.value is not None:
+                self.lines.append("%s%s = %s" % (self._ind(indent), name, str(node.value)))
+            else:
+                self.lines.append("%s%s" % (self._ind(indent), name))
+
+    def _fmt_arr(self, node, indent):
+        cn = node.class_name or "[]"
+        if node.encoding == "char_array":
+            self._add_ed(node.value, node)
+            self.lines.append('%s[char[]] "%s"' % (self._ind(indent), self._esc(node.value or "")))
+            return
+        if cn == '[B':
+            self.lines.append("%s[byte[%d]] %s" % (self._ind(indent), node.value_length, node.value or ""))
+            return
+        ec = len(node.elements)
+        self.lines.append("%s[%s] length=%d" % (self._ind(indent), cn, ec))
+        for elem in node.elements[:100]:
+            fn = getattr(elem, 'field_name', None)
+            pfx = "%s%s: " % (self._ind(indent + 1), fn) if fn else self._ind(indent + 1)
+            if elem.node_type in ("string", "string_field"):
+                val = elem.value if elem.value is not None else ""
+                self._add_ed(val, elem)
+                self.lines.append('%s(String) = "%s"' % (pfx, self._esc(val)))
+            elif elem.node_type == "object":
+                self._fmt_obj(elem, indent + 1)
+            elif elem.node_type in ("null", "null_field"):
+                self.lines.append("%snull" % pfx)
+            elif elem.node_type == "reference":
+                ref = elem.value
+                if ref and hasattr(ref, 'value') and isinstance(ref.value, str):
+                    self.lines.append('%s@ref -> "%s"' % (pfx, self._esc(ref.value)))
+                elif ref and hasattr(ref, 'class_name') and ref.class_name:
+                    self.lines.append('%s@ref -> %s' % (pfx, ref.class_name))
+                else:
+                    self.lines.append('%s@ref' % pfx)
+            else:
+                if isinstance(elem.value, bool):
+                    self.lines.append("%s(%s) = %s" % (pfx, elem.node_type, "true" if elem.value else "false"))
+                elif elem.value is not None:
+                    self.lines.append("%s(%s) = %s" % (pfx, elem.node_type, str(elem.value)))
+                else:
+                    self.lines.append("%s(%s)" % (pfx, elem.node_type))
+        if ec > 100:
+            self.lines.append("%s... %d more elements" % (self._ind(indent + 1), ec - 100))
+
+
+class ApplyDeserAction(ActionListener):
+    def __init__(self, tab):
+        self.tab = tab
+
+    def actionPerformed(self, event):
+        self.tab._apply()
+
+
+class DeserEditorTab(IMessageEditorTab):
+
+    def __init__(self, extender, controller, editable):
+        self._extender = extender
+        self._controller = controller
+        self._editable = editable
+        self._helpers = extender._helpers
+        self._text_area = JTextArea()
+        self._text_area.setFont(Font("Monospaced", Font.PLAIN, 12))
+        self._text_area.setEditable(editable)
+        self._text_area.setLineWrap(False)
+        self._text_area.setWrapStyleWord(False)
+        self._text_area.setTabSize(2)
+        self._scroll = JScrollPane(self._text_area)
+
+        self._panel = JPanel(BorderLayout())
+        if editable:
+            btn_panel = JPanel(FlowLayout(FlowLayout.LEFT, 5, 3))
+            self._apply_btn = JButton("Apply")
+            self._apply_btn.setFont(Font("Dialog", Font.BOLD, 11))
+            self._apply_btn.addActionListener(ApplyDeserAction(self))
+            btn_panel.add(self._apply_btn)
+            self._apply_status = JLabel("")
+            self._apply_status.setFont(Font("Dialog", Font.PLAIN, 11))
+            btn_panel.add(self._apply_status)
+            self._panel.add(btn_panel, BorderLayout.NORTH)
+        else:
+            self._apply_status = None
+
+        self._panel.add(self._scroll, BorderLayout.CENTER)
+
+        self._original_bytes = None
+        self._original_body = None
+        self._body_offset = 0
+        self._is_request = True
+        self._parsed_nodes = None
+        self._original_text = ""
+        self._editables = []
+        self._original_body_str = ""
+
+    def getTabCaption(self):
+        return "Deserialized"
+
+    def getUiComponent(self):
+        return self._panel
+
+    def isEnabled(self, content, isRequest):
+        if content is None or len(content) < 4:
+            return False
+        try:
+            if isRequest:
+                info = self._helpers.analyzeRequest(content)
+            else:
+                info = self._helpers.analyzeResponse(content)
+            bo = info.getBodyOffset()
+            if bo >= len(content) - 4:
+                return False
+            for h in info.getHeaders():
+                hl = str(h).lower()
+                if hl.startswith("content-type:") and "java-serialized-object" in hl:
+                    return True
+            body_str = self._helpers.bytesToString(content[bo:bo + 4])
+            if len(body_str) >= 4 and ord(body_str[0]) == 0xAC and ord(body_str[1]) == 0xED:
+                return True
+        except:
+            pass
+        return False
+
+    def setMessage(self, content, isRequest):
+        if content is None:
+            self._text_area.setText("")
+            self._original_bytes = None
+            return
+        self._original_bytes = content
+        self._is_request = isRequest
+        try:
+            if isRequest:
+                info = self._helpers.analyzeRequest(content)
+            else:
+                info = self._helpers.analyzeResponse(content)
+            self._body_offset = info.getBodyOffset()
+            body = content[self._body_offset:]
+            self._original_body = body
+            body_str = self._helpers.bytesToString(body)
+            self._original_body_str = body_str
+            parser = JavaSerialParser(body_str)
+            nodes = parser.parse()
+            if nodes is None:
+                self._text_area.setText("[!] Not a valid Java serialized stream")
+                self._original_text = ""
+                self._parsed_nodes = None
+                self._editables = []
+                return
+            self._parsed_nodes = nodes
+            formatter = JavaSerialFormatter()
+            text, editables = formatter.format(nodes, parser.error_msg)
+            self._original_text = text
+            self._editables = editables
+            self._text_area.setText(text)
+            self._text_area.setCaretPosition(0)
+        except Exception as e:
+            self._text_area.setText("[!] Error parsing: %s" % str(e))
+            self._original_text = ""
+            self._parsed_nodes = None
+            self._editables = []
+
+    def getMessage(self):
+        if self._original_bytes is None:
+            return self._original_bytes
+        if not self.isModified():
+            return self._original_bytes
+        current_text = self._text_area.getText()
+        try:
+            mod_body_str = self._reconstruct(current_text)
+            mod_body = self._helpers.stringToBytes(mod_body_str)
+            if self._is_request:
+                info = self._helpers.analyzeRequest(self._original_bytes)
+            else:
+                info = self._helpers.analyzeResponse(self._original_bytes)
+            headers = list(info.getHeaders())
+            updated = []
+            for h in headers:
+                if str(h).lower().startswith("content-length:"):
+                    updated.append("Content-Length: " + str(len(mod_body)))
+                else:
+                    updated.append(h)
+            return self._helpers.buildHttpMessage(updated, mod_body)
+        except Exception as e:
+            print("[!] DeserAuth editor reconstruct error: %s" % str(e))
+            return self._original_bytes
+
+    def isModified(self):
+        return bool(self._original_text and self._text_area.getText() != self._original_text)
+
+    def getSelectedData(self):
+        sel = self._text_area.getSelectedText()
+        if sel:
+            return self._helpers.stringToBytes(sel)
+        return None
+
+    def _reconstruct(self, current_text):
+        body_str = self._original_body_str
+        current_lines = current_text.split("\n")
+        changes = []
+        for line_idx, orig_val, node in self._editables:
+            if line_idx >= len(current_lines):
+                continue
+            new_val = self._extract_val(current_lines[line_idx], orig_val, node)
+            if new_val is not None and new_val != orig_val:
+                changes.append((orig_val, new_val, node))
+        for orig_val, new_val, node in changes:
+            if isinstance(orig_val, bool):
+                if node.value_offset >= 0 and node.value_length == 1:
+                    nb = chr(1) if new_val else chr(0)
+                    body_str = body_str[:node.value_offset] + nb + body_str[node.value_offset + 1:]
+                continue
+            if isinstance(orig_val, (int, long)):
+                tc = node.type_code
+                vo = node.value_offset
+                if tc == 'I' and vo >= 0:
+                    try:
+                        iv = int(new_val)
+                        if iv < 0:
+                            iv += 0x100000000
+                        nb = chr((iv >> 24) & 0xFF) + chr((iv >> 16) & 0xFF) + chr((iv >> 8) & 0xFF) + chr(iv & 0xFF)
+                        body_str = body_str[:vo] + nb + body_str[vo + 4:]
+                    except:
+                        pass
+                elif tc == 'S' and vo >= 0:
+                    try:
+                        sv = int(new_val)
+                        if sv < 0:
+                            sv += 0x10000
+                        nb = chr((sv >> 8) & 0xFF) + chr(sv & 0xFF)
+                        body_str = body_str[:vo] + nb + body_str[vo + 2:]
+                    except:
+                        pass
+                elif tc == 'B' and vo >= 0:
+                    try:
+                        body_str = body_str[:vo] + chr(int(new_val) & 0xFF) + body_str[vo + 1:]
+                    except:
+                        pass
+                elif tc == 'J' and vo >= 0:
+                    try:
+                        lv = long(new_val)
+                        if lv < 0:
+                            lv += 0x10000000000000000
+                        nb = ""
+                        for sh in [56, 48, 40, 32, 24, 16, 8, 0]:
+                            nb += chr((lv >> sh) & 0xFF)
+                        body_str = body_str[:vo] + nb + body_str[vo + 8:]
+                    except:
+                        pass
+                continue
+            if isinstance(orig_val, float):
+                tc = node.type_code
+                vo = node.value_offset
+                if tc == 'F' and vo >= 0:
+                    try:
+                        nb = struct.pack('>f', float(new_val))
+                        body_str = body_str[:vo] + nb + body_str[vo + 4:]
+                    except:
+                        pass
+                elif tc == 'D' and vo >= 0:
+                    try:
+                        nb = struct.pack('>d', float(new_val))
+                        body_str = body_str[:vo] + nb + body_str[vo + 8:]
+                    except:
+                        pass
+                continue
+            if isinstance(orig_val, str) and isinstance(new_val, str):
+                body_str = self._extender.apply_swap_any(body_str, str(orig_val), str(new_val))
+        return body_str
+
+    def _extract_val(self, line, orig_val, node):
+        if isinstance(orig_val, str):
+            dq = line.find('"')
+            if dq >= 0:
+                eq = len(line) - 1
+                while eq > dq and line[eq] != '"':
+                    eq -= 1
+                if eq > dq:
+                    return self._unesc(line[dq + 1:eq])
+            return None
+        if isinstance(orig_val, bool):
+            if "= true" in line:
+                return True
+            elif "= false" in line:
+                return False
+            return None
+        ei = line.rfind("= ")
+        if ei >= 0:
+            vs = line[ei + 2:].strip()
+            try:
+                if isinstance(orig_val, float):
+                    return float(vs)
+                return int(vs)
+            except:
+                try:
+                    return long(vs)
+                except:
+                    pass
+        return None
+
+    def _unesc(self, s):
+        r = []
+        i = 0
+        while i < len(s):
+            if i + 1 < len(s) and s[i] == '\\':
+                c = s[i + 1]
+                if c == '\\':
+                    r.append('\\')
+                elif c == '"':
+                    r.append('"')
+                elif c == 'n':
+                    r.append('\n')
+                elif c == 'r':
+                    r.append('\r')
+                elif c == 't':
+                    r.append('\t')
+                else:
+                    r.append('\\')
+                    r.append(c)
+                i += 2
+            else:
+                r.append(s[i])
+                i += 1
+        return ''.join(r)
+
+    def _apply(self):
+        if not self.isModified():
+            if self._apply_status:
+                self._apply_status.setText("No changes to apply")
+                self._apply_status.setForeground(Color(100, 100, 100))
+            return
+        current_text = self._text_area.getText()
+        try:
+            mod_body_str = self._reconstruct(current_text)
+            mod_body = self._helpers.stringToBytes(mod_body_str)
+            if self._is_request:
+                info = self._helpers.analyzeRequest(self._original_bytes)
+            else:
+                info = self._helpers.analyzeResponse(self._original_bytes)
+            headers = list(info.getHeaders())
+            updated = []
+            for h in headers:
+                if str(h).lower().startswith("content-length:"):
+                    updated.append("Content-Length: " + str(len(mod_body)))
+                else:
+                    updated.append(h)
+            self._original_bytes = self._helpers.buildHttpMessage(updated, mod_body)
+            self._original_body_str = mod_body_str
+            self._original_body = mod_body
+            parser = JavaSerialParser(mod_body_str)
+            nodes = parser.parse()
+            if nodes:
+                self._parsed_nodes = nodes
+                formatter = JavaSerialFormatter()
+                text, editables = formatter.format(nodes, parser.error_msg)
+                self._original_text = text
+                self._editables = editables
+                self._text_area.setText(text)
+                self._text_area.setCaretPosition(0)
+                if self._apply_status:
+                    self._apply_status.setText("Applied - switch to Raw/Pretty to see reconstructed binary")
+                    self._apply_status.setForeground(Color(0, 130, 0))
+            else:
+                if self._apply_status:
+                    self._apply_status.setText("Applied but re-parse failed")
+                    self._apply_status.setForeground(Color(180, 0, 0))
+        except Exception as e:
+            if self._apply_status:
+                self._apply_status.setText("Error: %s" % str(e))
+                self._apply_status.setForeground(Color(180, 0, 0))
+            print("[!] DeserAuth apply error: %s" % str(e))
+
+
+class BurpExtender(IBurpExtender, ITab, IHttpListener, IMessageEditorController, IContextMenuFactory, IExtensionStateListener, IMessageEditorTabFactory):
 
     def registerExtenderCallbacks(self, callbacks):
         self._callbacks = callbacks
@@ -575,9 +1648,10 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IMessageEditorController,
         self._callbacks.addSuiteTab(self)
         self._callbacks.registerHttpListener(self)
         self._callbacks.registerContextMenuFactory(self)
+        self._callbacks.registerMessageEditorTabFactory(self)
 
-        print("[+] DeserAuth v1.2 loaded")
-        print("[+] Passive analyzer + manual context menu + saved-rule context actions")
+        print("[+] DeserAuth v2.0 loaded")
+        print("[+] Passive analyzer + manual context menu + saved-rule context actions + deserialized editor tab")
 
     def getTabCaption(self):
         return "DeserAuth"
@@ -593,6 +1667,9 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IMessageEditorController,
 
     def getResponse(self):
         return None
+
+    def createNewInstance(self, controller, editable):
+        return DeserEditorTab(self, controller, editable)
 
     def createMenuItems(self, invocation):
         menu = ArrayList()
@@ -1244,7 +2321,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IMessageEditorController,
     def _export_xml(self, filepath, log, fields):
         f = open(filepath, 'wb')
         out = '<?xml version="1.0" encoding="UTF-8"?>\n'
-        out += '<deserauth_export generator="DeserAuth v1.2" date="%s" count="%d">\n' % (time.strftime("%Y-%m-%d %H:%M:%S"), len(log))
+        out += '<deserauth_export generator="DeserAuth v2.0" date="%s" count="%d">\n' % (time.strftime("%Y-%m-%d %H:%M:%S"), len(log))
         f.write(out.encode('utf-8'))
 
         for i, entry in enumerate(log):
