@@ -36,6 +36,44 @@ Many enterprise Java thick-client applications embed user identity (USERID, acco
 
 ---
 
+## What's New in v2.0
+
+### Deserialized Message Editor Tab
+
+<!-- TODO: Add screenshot of the Deserialized tab showing parsed Java objects -->
+
+DeserAuth now adds a **"Deserialized"** tab alongside Pretty/Raw/Hex in Burp's message editors - just like how the JWT extension decodes JSON Web Tokens, DeserAuth decodes Java serialized objects into a **human-readable, editable** view.
+
+- **Automatic detection** - tab appears whenever a request or response contains Java serialized data (`Content-Type: application/x-java-serialized-object` or `AC ED 00 05` magic bytes)
+- **Full protocol parser** - decodes TC_OBJECT, TC_STRING, TC_ARRAY, TC_CLASSDESC, TC_REFERENCE, TC_ENUM, TC_BLOCKDATA, TC_PROXYCLASSDESC, and all Java primitives
+- **Live editing** - modify string values, numbers, and booleans directly in the structured text view
+- **Apply button** - click Apply to reconstruct the binary and verify your changes in Raw/Pretty before sending
+- **Automatic reconstruction** - edits are also applied when switching tabs or sending the request
+- **Works everywhere** - available in Proxy (intercept + history), Repeater, Intruder, Scanner, and any extension that uses Burp's standard message editor (Stepper, Logger++, Autorize, etc.)
+
+Example output:
+```
+=== Deserialized Java Object Stream ===
+
+[Object] org.springframework.remoting.support.RemoteInvocation
+  methodName (String) = "getUserProfile"
+  parameterTypes:
+    [Ljava.lang.Class;] length=1
+      [0]: (String) = "java.lang.String"
+  arguments:
+    [Ljava.lang.Object;] length=1
+      [0]: (String) = "admin_user"
+  [Object] java.util.Hashtable
+    (String) = "appcontext"
+    [Object] java.util.Hashtable
+      (String) = "USERID"
+      (String) = "ID00001"
+      (String) = "locale"
+      (String) = "en_AU"
+```
+
+---
+
 ## Features
 
 
@@ -46,9 +84,9 @@ Many enterprise Java thick-client applications embed user identity (USERID, acco
 - Intercepts all matching requests across selected Burp tools
 - Automatically replays with modified serialized values
 - Compares original vs modified responses
-- Color-codes results: 🟢 SAME | 🟡 SIMILAR | 🔴 DIFFERENT
+- Color-codes results: SAME | SIMILAR | DIFFERENT
 
-###️ Manual Right-Click Actions
+### Manual Right-Click Actions
 
 <img width="972" height="593" alt="image" src="https://github.com/user-attachments/assets/de66f823-fda1-4207-b033-2321aaa0a711" />
 
@@ -103,11 +141,32 @@ Extender → Add → Extension Type: Python → Select deserauth.py
 ```
 
 
-4. A new **"DeserAuth"** tab appears in Burp.
+4. A new **"DeserAuth"** tab appears in Burp, and a **"Deserialized"** tab appears in all message editors when viewing Java serialized content.
 
 ---
 
 ## Usage Guide
+
+### Deserialized Editor Tab (New in v2.0)
+
+The Deserialized tab appears automatically alongside Pretty/Raw/Hex whenever a request or response contains Java serialized data.
+
+1. **Navigate to any serialized request** in Proxy, Repeater, Intruder, or any message editor
+2. **Click the "Deserialized" tab** to see the parsed object tree
+3. **Edit values** directly in the text view - change strings (in quotes), numbers, or booleans
+4. **Click "Apply"** to reconstruct the binary and verify your changes
+5. **Switch to Raw/Pretty** to see the reconstructed serialized bytes
+6. **Send the request** - modifications are automatically applied
+
+| Location | View | Edit | Apply |
+|---|---|---|---|
+| Proxy Intercept | Yes | Yes | Yes |
+| Proxy History | Yes | No | No |
+| Repeater | Yes | Yes | Yes |
+| Intruder | Yes | Yes | Yes |
+| Scanner | Yes | No | No |
+| Target Site Map | Yes | No | No |
+| Other Extensions (Stepper, etc.) | Yes | Depends | Depends |
 
 ### Passive Mode (Automatic Authorization Testing)
 
@@ -191,6 +250,14 @@ Replace: alert(1)
 
 Tests if deserialized values reach sinks without sanitization.
 
+### 6. Live Object Inspection (New in v2.0)
+
+Use the Deserialized tab to inspect any serialized request without swap rules:
+
+- Identify class names, method calls, and parameters in unfamiliar applications
+- Discover hidden fields and values embedded in the binary stream
+- Understand the object structure before crafting targeted test payloads
+
 ---
 
 ## How It Works
@@ -198,26 +265,35 @@ Tests if deserialized values reach sinks without sanitization.
 ### Architecture
 
 ```
-┌──────────────────────────────────────────────────────────┐
-│                  DeserAuth Extension                     │
-├──────────────────────────┬───────────────────────────────┤
-│   IHttpListener          │   IContextMenuFactory         │
-│   (Passive Mode)         │   (Manual Mode)               │
-│                          │                               │
-│   Intercepts responses   │   Right-click actions         │
-│   from selected tools    │   Send to Repeater            │
-│   → Apply swap rules     │   → Same/Any/Batch/Saved      │
-│   → Replay modified      │                               │
-│   → Compare responses    │                               │
-│   → Log results          │                               │
-├──────────────────────────┴───────────────────────────────┤
-│                    Swap Engine                           │
-│                                                          │
-│   1. UTF-16BE char[] replacement (with null-padding)     │
-│   2. Array size prefix patching (4-byte big-endian int)  │
-│   3. TC_STRING length prefix patching (2-byte)           │
-│   4. ASCII fallback replacement                          │
-└──────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                     DeserAuth Extension                          │
+├─────────────────┬──────────────────┬─────────────────────────────┤
+│ IHttpListener   │ IContextMenu     │ IMessageEditorTabFactory    │
+│ (Passive Mode)  │ Factory          │ (Deserialized Tab)          │
+│                 │ (Manual Mode)    │                             │
+│ Intercepts      │ Right-click      │ Adds "Deserialized" tab    │
+│ responses from  │ actions: Send    │ to all message editors      │
+│ selected tools  │ to Repeater      │ → Parses binary stream      │
+│ → Apply rules   │ → Same/Any/     │ → Shows editable tree       │
+│ → Replay        │   Batch/Saved    │ → Reconstructs on Apply     │
+│ → Compare       │                  │ → Patches binary on send    │
+│ → Log results   │                  │                             │
+├─────────────────┴──────────────────┴─────────────────────────────┤
+│                    Swap Engine                                    │
+│                                                                  │
+│   1. UTF-16BE char[] replacement (with null-padding)             │
+│   2. Array size prefix patching (4-byte big-endian int)          │
+│   3. TC_STRING length prefix patching (2-byte)                   │
+│   4. ASCII fallback replacement                                  │
+├──────────────────────────────────────────────────────────────────┤
+│                Java Serialization Parser (New in v2.0)            │
+│                                                                  │
+│   Full Java Object Serialization Stream Protocol decoder:        │
+│   TC_OBJECT | TC_STRING | TC_ARRAY | TC_CLASSDESC | TC_ENUM     │
+│   TC_REFERENCE | TC_BLOCKDATA | TC_PROXYCLASSDESC | Primitives  │
+│   → Structured text output with editable values                  │
+│   → Graceful degradation for unknown/exotic structures           │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
 ### Serialized String Storage in Java
@@ -268,13 +344,26 @@ DeserAuth handles both formats automatically.
 | `ZipException: zip END header not found` | You selected "Java" extension type - change to "Python" |
 | `NameError: global name 'X' is not defined` | Missing import - check Jython console output |
 | No entries appearing in table | Verify: rules have search values, scope is correct, START is clicked |
+| Deserialized tab not appearing | Request must contain `Content-Type: application/x-java-serialized-object` header or body starting with `AC ED 00 05` |
+| Deserialized tab shows parse error | Complex or non-standard serialized objects may partially parse - check the Raw tab for full content |
+| Apply button not visible | The Apply button only appears in editable editors (Repeater request, Proxy intercept) - not in read-only views |
 | Export fails with encoding error | Fixed in v1.2 - binary bodies are sanitized before export |
 
 ---
 
 ## Changelog
 
-### v1.2 (Current)
+### v2.0 (Current)
+- **Deserialized Message Editor Tab** - human-readable view of Java serialized objects, like JWT extension for serialization
+- Full Java Object Serialization Stream Protocol parser (TC_OBJECT, TC_STRING, TC_ARRAY, TC_CLASSDESC, TC_REFERENCE, TC_ENUM, TC_BLOCKDATA, TC_PROXYCLASSDESC, all primitives)
+- Live editing of string, numeric, and boolean values in the structured text view
+- Apply button for manual reconstruction with status feedback
+- Automatic binary reconstruction on tab switch or send
+- Works across all Burp message editors (Proxy, Repeater, Intruder, Scanner, and third-party extensions)
+- char[] arrays displayed as decoded strings for readability
+- Graceful degradation for complex/unknown serialized structures
+
+### v1.2
 - Added right-click context menu with Same/Any/Batch modes
 - Added "Send to Repeater using Saved Rule" for instant rule application
 - Added full export support (CSV, HTML, XML, Excel)
@@ -323,10 +412,10 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ---
 
-If this tool helps you find authorization bugs, please consider giving it a ⭐!
+If this tool helps you find authorization bugs, please consider giving it a star!
 
 ---
 
 <p align="center">
-  <sub>Built with ☕ for the offensive security community</sub>
+  <sub>Built with coffee for the offensive security community</sub>
 </p>
