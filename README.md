@@ -271,26 +271,26 @@ Use the Deserialized tab to inspect any serialized request without swap rules:
 │ IHttpListener   │ IContextMenu     │ IMessageEditorTabFactory    │
 │ (Passive Mode)  │ Factory          │ (Deserialized Tab)          │
 │                 │ (Manual Mode)    │                             │
-│ Intercepts      │ Right-click      │ Adds "Deserialized" tab    │
+│ Intercepts      │ Right-click      │ Adds "Deserialized" tab     │
 │ responses from  │ actions: Send    │ to all message editors      │
 │ selected tools  │ to Repeater      │ → Parses binary stream      │
-│ → Apply rules   │ → Same/Any/     │ → Shows editable tree       │
+│ → Apply rules   │ → Same/Any/     │ → Shows editable tree        │
 │ → Replay        │   Batch/Saved    │ → Reconstructs on Apply     │
 │ → Compare       │                  │ → Patches binary on send    │
 │ → Log results   │                  │                             │
 ├─────────────────┴──────────────────┴─────────────────────────────┤
-│                    Swap Engine                                    │
+│                    Swap Engine                                   │
 │                                                                  │
 │   1. UTF-16BE char[] replacement (with null-padding)             │
 │   2. Array size prefix patching (4-byte big-endian int)          │
 │   3. TC_STRING length prefix patching (2-byte)                   │
 │   4. ASCII fallback replacement                                  │
 ├──────────────────────────────────────────────────────────────────┤
-│                Java Serialization Parser (New in v2.0)            │
+│                Java Serialization Parser (New in v2.0)           │
 │                                                                  │
 │   Full Java Object Serialization Stream Protocol decoder:        │
-│   TC_OBJECT | TC_STRING | TC_ARRAY | TC_CLASSDESC | TC_ENUM     │
-│   TC_REFERENCE | TC_BLOCKDATA | TC_PROXYCLASSDESC | Primitives  │
+│   TC_OBJECT | TC_STRING | TC_ARRAY | TC_CLASSDESC | TC_ENUM      │
+│   TC_REFERENCE | TC_BLOCKDATA | TC_PROXYCLASSDESC | Primitives   │
 │   → Structured text output with editable values                  │
 │   → Graceful degradation for unknown/exotic structures           │
 └──────────────────────────────────────────────────────────────────┘
