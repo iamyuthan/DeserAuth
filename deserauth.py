@@ -1,5 +1,5 @@
 # ==============================================================
-#  DeserAuth v2.0 - Deserialization Authorization Analyzer
+#  DeserAuth v2.1 - Deserialization Authorization Analyzer
 #  
 #  Automated Java Serialization Manipulation & Authorization
 #  Testing for Burp Suite
@@ -19,6 +19,8 @@
 #
 #  Features:
 #    - Deserialized message editor tab (live decode/edit like JWT)
+#    - Detects serialized objects in body, cookies, and headers
+#    - Auto Base64 and URL encoding detection with full round-trip
 #    - Passive automatic analysis (intercept & compare)
 #    - Manual right-click Send-to-Repeater mutations
 #    - Same-length and variable-length serialized string swapping
@@ -67,6 +69,8 @@ import java.awt.Desktop as Desktop
 import java.net.URI as URI
 import time
 import struct
+import base64
+import urllib
 
 class SwapRule:
     def __init__(self, search="", replace="", mode="any", enabled=True):
@@ -1185,6 +1189,11 @@ class DeserEditorTab(IMessageEditorTab):
         self._original_text = ""
         self._editables = []
         self._original_body_str = ""
+        self._source_type = 'body'
+        self._source_name = None
+        self._encoding = []
+        self._source_raw_value = None
+        self._last_source_result = None
 
     def getTabCaption(self):
         return "Deserialized"
@@ -1195,23 +1204,11 @@ class DeserEditorTab(IMessageEditorTab):
     def isEnabled(self, content, isRequest):
         if content is None or len(content) < 4:
             return False
-        try:
-            if isRequest:
-                info = self._helpers.analyzeRequest(content)
-            else:
-                info = self._helpers.analyzeResponse(content)
-            bo = info.getBodyOffset()
-            if bo >= len(content) - 4:
-                return False
-            for h in info.getHeaders():
-                hl = str(h).lower()
-                if hl.startswith("content-type:") and "java-serialized-object" in hl:
-                    return True
-            body_str = self._helpers.bytesToString(content[bo:bo + 4])
-            if len(body_str) >= 4 and ord(body_str[0]) == 0xAC and ord(body_str[1]) == 0xED:
-                return True
-        except:
-            pass
+        result = self._find_serial_source(content, isRequest)
+        if result:
+            self._last_source_result = result
+            return True
+        self._last_source_result = None
         return False
 
     def setMessage(self, content, isRequest):
@@ -1222,16 +1219,32 @@ class DeserEditorTab(IMessageEditorTab):
         self._original_bytes = content
         self._is_request = isRequest
         try:
+            result = self._last_source_result
+            if result is None:
+                result = self._find_serial_source(content, isRequest)
+            self._last_source_result = None
+            if result is None:
+                self._text_area.setText("[!] No Java serialized data found")
+                self._original_text = ""
+                self._parsed_nodes = None
+                self._editables = []
+                return
+            serial_data, src_type, src_name, enc_layers, raw_value = result
+            self._source_type = src_type
+            self._source_name = src_name
+            self._encoding = enc_layers
+            self._source_raw_value = raw_value
             if isRequest:
                 info = self._helpers.analyzeRequest(content)
             else:
                 info = self._helpers.analyzeResponse(content)
             self._body_offset = info.getBodyOffset()
-            body = content[self._body_offset:]
-            self._original_body = body
-            body_str = self._helpers.bytesToString(body)
-            self._original_body_str = body_str
-            parser = JavaSerialParser(body_str)
+            if src_type == 'body' and not enc_layers:
+                self._original_body = content[self._body_offset:]
+            else:
+                self._original_body = self._helpers.stringToBytes(serial_data)
+            self._original_body_str = serial_data
+            parser = JavaSerialParser(serial_data)
             nodes = parser.parse()
             if nodes is None:
                 self._text_area.setText("[!] Not a valid Java serialized stream")
@@ -1242,6 +1255,12 @@ class DeserEditorTab(IMessageEditorTab):
             self._parsed_nodes = nodes
             formatter = JavaSerialFormatter()
             text, editables = formatter.format(nodes, parser.error_msg)
+            source_label = self._get_source_label()
+            if source_label:
+                lines = text.split("\n")
+                lines.insert(1, source_label)
+                text = "\n".join(lines)
+                editables = [(li + 1, v, n) for li, v, n in editables]
             self._original_text = text
             self._editables = editables
             self._text_area.setText(text)
@@ -1259,20 +1278,8 @@ class DeserEditorTab(IMessageEditorTab):
             return self._original_bytes
         current_text = self._text_area.getText()
         try:
-            mod_body_str = self._reconstruct(current_text)
-            mod_body = self._helpers.stringToBytes(mod_body_str)
-            if self._is_request:
-                info = self._helpers.analyzeRequest(self._original_bytes)
-            else:
-                info = self._helpers.analyzeResponse(self._original_bytes)
-            headers = list(info.getHeaders())
-            updated = []
-            for h in headers:
-                if str(h).lower().startswith("content-length:"):
-                    updated.append("Content-Length: " + str(len(mod_body)))
-                else:
-                    updated.append(h)
-            return self._helpers.buildHttpMessage(updated, mod_body)
+            mod_serial_str = self._reconstruct(current_text)
+            return self._write_back(mod_serial_str)
         except Exception as e:
             print("[!] DeserAuth editor reconstruct error: %s" % str(e))
             return self._original_bytes
@@ -1415,16 +1422,135 @@ class DeserEditorTab(IMessageEditorTab):
                 i += 1
         return ''.join(r)
 
-    def _apply(self):
-        if not self.isModified():
-            if self._apply_status:
-                self._apply_status.setText("No changes to apply")
-                self._apply_status.setForeground(Color(100, 100, 100))
-            return
-        current_text = self._text_area.getText()
+    def _is_serial_magic(self, data):
+        return len(data) >= 4 and ord(data[0]) == 0xAC and ord(data[1]) == 0xED
+
+    def _try_decode(self, value):
+        if not value or len(value) < 4:
+            return None
+        if self._is_serial_magic(value):
+            return (value, [])
         try:
-            mod_body_str = self._reconstruct(current_text)
-            mod_body = self._helpers.stringToBytes(mod_body_str)
+            v = str(value).strip()
+            pad = len(v) % 4
+            if pad:
+                v += '=' * (4 - pad)
+            decoded = base64.b64decode(v)
+            if self._is_serial_magic(decoded):
+                return (decoded, ['base64'])
+        except:
+            pass
+        try:
+            url_decoded = urllib.unquote(str(value))
+            if url_decoded != str(value):
+                v = url_decoded.strip()
+                pad = len(v) % 4
+                if pad:
+                    v += '=' * (4 - pad)
+                b64_decoded = base64.b64decode(v)
+                if self._is_serial_magic(b64_decoded):
+                    return (b64_decoded, ['url', 'base64'])
+        except:
+            pass
+        return None
+
+    def _find_serial_source(self, content, isRequest):
+        try:
+            if isRequest:
+                info = self._helpers.analyzeRequest(content)
+            else:
+                info = self._helpers.analyzeResponse(content)
+            bo = info.getBodyOffset()
+            headers = list(info.getHeaders())
+
+            if bo < len(content) - 2:
+                body_str = self._helpers.bytesToString(content[bo:])
+                result = self._try_decode(body_str)
+                if result:
+                    return (result[0], 'body', None, result[1], body_str)
+
+            if isRequest:
+                try:
+                    params = info.getParameters()
+                    if params:
+                        for p in params:
+                            if p.getType() == 2:
+                                cval = str(p.getValue())
+                                if cval and len(cval) > 8:
+                                    result = self._try_decode(cval)
+                                    if result:
+                                        return (result[0], 'cookie', str(p.getName()), result[1], cval)
+                except:
+                    pass
+
+            if not isRequest:
+                for h in headers:
+                    hs = str(h)
+                    if hs.lower().startswith("set-cookie:"):
+                        parts = hs[len("set-cookie:"):].strip()
+                        eq_idx = parts.find('=')
+                        if eq_idx > 0:
+                            cname = parts[:eq_idx].strip()
+                            rest = parts[eq_idx + 1:]
+                            semi_idx = rest.find(';')
+                            cval = rest[:semi_idx].strip() if semi_idx > 0 else rest.strip()
+                            if cval and len(cval) > 8:
+                                result = self._try_decode(cval)
+                                if result:
+                                    return (result[0], 'set-cookie', cname, result[1], cval)
+
+            skip = frozenset(['content-type', 'content-length', 'host', 'user-agent',
+                              'accept', 'accept-language', 'accept-encoding',
+                              'connection', 'origin', 'referer', 'cache-control',
+                              'pragma', 'if-modified-since', 'if-none-match',
+                              'date', 'server', 'transfer-encoding', 'vary',
+                              'cookie', 'set-cookie'])
+            for h in headers:
+                hs = str(h)
+                colon = hs.find(':')
+                if colon <= 0:
+                    continue
+                hname = hs[:colon]
+                if hname.lower() in skip:
+                    continue
+                hval = hs[colon + 1:].strip()
+                if hval and len(hval) > 8:
+                    result = self._try_decode(hval)
+                    if result:
+                        return (result[0], 'header', hname, result[1], hval)
+        except:
+            pass
+        return None
+
+    def _encode_value(self, data_str, encoding_layers):
+        result = data_str
+        for layer in reversed(encoding_layers):
+            if layer == 'base64':
+                result = base64.b64encode(result)
+                if self._source_raw_value and not self._source_raw_value.rstrip().endswith('='):
+                    result = result.rstrip('=')
+            elif layer == 'url':
+                result = urllib.quote(result, safe='')
+        return result
+
+    def _get_source_label(self):
+        enc_str = ""
+        if self._encoding:
+            enc_str = " [%s encoded]" % " + ".join(self._encoding)
+        if self._source_type == 'cookie':
+            return 'Source: Cookie "%s"%s' % (self._source_name, enc_str)
+        elif self._source_type == 'set-cookie':
+            return 'Source: Set-Cookie "%s"%s' % (self._source_name, enc_str)
+        elif self._source_type == 'header':
+            return 'Source: Header "%s"%s' % (self._source_name, enc_str)
+        elif self._source_type == 'body' and self._encoding:
+            return 'Source: Body%s' % enc_str
+        return ""
+
+    def _write_back(self, mod_serial_str):
+        encoded = self._encode_value(mod_serial_str, self._encoding)
+        if self._source_type == 'body':
+            mod_body = self._helpers.stringToBytes(encoded)
             if self._is_request:
                 info = self._helpers.analyzeRequest(self._original_bytes)
             else:
@@ -1436,21 +1562,82 @@ class DeserEditorTab(IMessageEditorTab):
                     updated.append("Content-Length: " + str(len(mod_body)))
                 else:
                     updated.append(h)
-            self._original_bytes = self._helpers.buildHttpMessage(updated, mod_body)
-            self._original_body_str = mod_body_str
-            self._original_body = mod_body
-            parser = JavaSerialParser(mod_body_str)
+            return self._helpers.buildHttpMessage(updated, mod_body)
+        elif self._source_type == 'cookie':
+            new_param = self._helpers.buildParameter(
+                self._source_name, encoded, 2)
+            return self._helpers.updateParameter(self._original_bytes, new_param)
+        elif self._source_type == 'set-cookie':
+            if self._is_request:
+                info = self._helpers.analyzeRequest(self._original_bytes)
+            else:
+                info = self._helpers.analyzeResponse(self._original_bytes)
+            headers = list(info.getHeaders())
+            body = self._original_bytes[info.getBodyOffset():]
+            updated = []
+            for h in headers:
+                hs = str(h)
+                if hs.lower().startswith("set-cookie:") and self._source_raw_value and self._source_raw_value in hs:
+                    updated.append(hs.replace(self._source_raw_value, encoded))
+                else:
+                    updated.append(h)
+            return self._helpers.buildHttpMessage(updated, body)
+        elif self._source_type == 'header':
+            if self._is_request:
+                info = self._helpers.analyzeRequest(self._original_bytes)
+            else:
+                info = self._helpers.analyzeResponse(self._original_bytes)
+            headers = list(info.getHeaders())
+            body = self._original_bytes[info.getBodyOffset():]
+            updated = []
+            for h in headers:
+                hs = str(h)
+                colon = hs.find(':')
+                if colon > 0 and hs[:colon] == self._source_name and self._source_raw_value and self._source_raw_value in hs:
+                    updated.append(hs.replace(self._source_raw_value, encoded))
+                else:
+                    updated.append(h)
+            return self._helpers.buildHttpMessage(updated, body)
+        return self._original_bytes
+
+    def _apply(self):
+        if not self.isModified():
+            if self._apply_status:
+                self._apply_status.setText("No changes to apply")
+                self._apply_status.setForeground(Color(100, 100, 100))
+            return
+        current_text = self._text_area.getText()
+        try:
+            mod_serial_str = self._reconstruct(current_text)
+            self._original_bytes = self._write_back(mod_serial_str)
+            self._original_body_str = mod_serial_str
+            self._original_body = self._helpers.stringToBytes(mod_serial_str)
+            self._source_raw_value = self._encode_value(mod_serial_str, self._encoding)
+            parser = JavaSerialParser(mod_serial_str)
             nodes = parser.parse()
             if nodes:
                 self._parsed_nodes = nodes
                 formatter = JavaSerialFormatter()
                 text, editables = formatter.format(nodes, parser.error_msg)
+                source_label = self._get_source_label()
+                if source_label:
+                    lines = text.split("\n")
+                    lines.insert(1, source_label)
+                    text = "\n".join(lines)
+                    editables = [(li + 1, v, n) for li, v, n in editables]
                 self._original_text = text
                 self._editables = editables
                 self._text_area.setText(text)
                 self._text_area.setCaretPosition(0)
                 if self._apply_status:
-                    self._apply_status.setText("Applied - switch to Raw/Pretty to see reconstructed binary")
+                    loc = ""
+                    if self._source_type == 'cookie':
+                        loc = " (Cookie: %s)" % self._source_name
+                    elif self._source_type == 'set-cookie':
+                        loc = " (Set-Cookie: %s)" % self._source_name
+                    elif self._source_type == 'header':
+                        loc = " (Header: %s)" % self._source_name
+                    self._apply_status.setText("Applied%s - switch to Raw/Pretty to verify" % loc)
                     self._apply_status.setForeground(Color(0, 130, 0))
             else:
                 if self._apply_status:
@@ -1650,7 +1837,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IMessageEditorController,
         self._callbacks.registerContextMenuFactory(self)
         self._callbacks.registerMessageEditorTabFactory(self)
 
-        print("[+] DeserAuth v2.0 loaded")
+        print("[+] DeserAuth v2.1 loaded")
         print("[+] Passive analyzer + manual context menu + saved-rule context actions + deserialized editor tab")
 
     def getTabCaption(self):
@@ -2321,7 +2508,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IMessageEditorController,
     def _export_xml(self, filepath, log, fields):
         f = open(filepath, 'wb')
         out = '<?xml version="1.0" encoding="UTF-8"?>\n'
-        out += '<deserauth_export generator="DeserAuth v2.0" date="%s" count="%d">\n' % (time.strftime("%Y-%m-%d %H:%M:%S"), len(log))
+        out += '<deserauth_export generator="DeserAuth v2.1" date="%s" count="%d">\n' % (time.strftime("%Y-%m-%d %H:%M:%S"), len(log))
         f.write(out.encode('utf-8'))
 
         for i, entry in enumerate(log):
