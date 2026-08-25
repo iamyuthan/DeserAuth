@@ -36,15 +36,37 @@ Many enterprise Java thick-client applications embed user identity (USERID, acco
 
 ---
 
-## What's New in v2.0
+## What's New in v2.1
+
+### Cookie and Header Detection with Auto Encoding
+
+DeserAuth now detects Java serialized objects **everywhere** -- not just in the body, but also in:
+- **Cookies** (request `Cookie:` and response `Set-Cookie:` headers)
+- **HTTP headers** (any custom header value)
+- **Base64 encoded** values are automatically decoded and re-encoded on edit
+- **URL + Base64 encoded** values are handled with full round-trip support
+
+When a serialized object is found in a cookie or header, the Deserialized tab shows a source label:
+```
+=== Deserialized Java Object Stream ===
+Source: Cookie "OAUTH_REQUEST" [base64 encoded]
+
+[Object] org.springframework.security.oauth2.core.endpoint.OAuth2AuthorizationRequest
+  ...
+```
+
+Editing and clicking Apply reconstructs the binary, re-encodes it as Base64, and writes it back into the cookie/header.
 
 ### Deserialized Message Editor Tab
 
 <!-- TODO: Add screenshot of the Deserialized tab showing parsed Java objects -->
 
-DeserAuth now adds a **"Deserialized"** tab alongside Pretty/Raw/Hex in Burp's message editors - just like how the JWT extension decodes JSON Web Tokens, DeserAuth decodes Java serialized objects into a **human-readable, editable** view.
+DeserAuth adds a **"Deserialized"** tab alongside Pretty/Raw/Hex in Burp's message editors - just like how the JWT extension decodes JSON Web Tokens, DeserAuth decodes Java serialized objects into a **human-readable, editable** view.
 
 - **Automatic detection** - tab appears whenever a request or response contains Java serialized data (`Content-Type: application/x-java-serialized-object` or `AC ED 00 05` magic bytes)
+- **Cookie and header detection** - finds serialized objects embedded in cookies and HTTP headers, not just the body
+- **Auto encoding detection** - automatically detects and handles Base64 and URL encoding layers around serialized data
+- **Full round-trip editing** - edit values in cookies/headers and DeserAuth reconstructs, re-encodes (Base64, URL), and writes back to the exact location
 - **Full protocol parser** - decodes TC_OBJECT, TC_STRING, TC_ARRAY, TC_CLASSDESC, TC_REFERENCE, TC_ENUM, TC_BLOCKDATA, TC_PROXYCLASSDESC, and all Java primitives
 - **Live editing** - modify string values, numbers, and booleans directly in the structured text view
 - **Apply button** - click Apply to reconstruct the binary and verify your changes in Raw/Pretty before sending
@@ -275,26 +297,26 @@ Use the Deserialized tab to inspect any serialized request without swap rules:
 │ IHttpListener   │ IContextMenu     │ IMessageEditorTabFactory    │
 │ (Passive Mode)  │ Factory          │ (Deserialized Tab)          │
 │                 │ (Manual Mode)    │                             │
-│ Intercepts      │ Right-click      │ Adds "Deserialized" tab     │
+│ Intercepts      │ Right-click      │ Adds "Deserialized" tab    │
 │ responses from  │ actions: Send    │ to all message editors      │
-│ selected tools  │ to Repeater      │ → Parses binary stream      │
-│ → Apply rules   │ → Same/Any/     │ → Shows editable tree        │
-│ → Replay        │   Batch/Saved    │ → Reconstructs on Apply     │
-│ → Compare       │                  │ → Patches binary on send    │
-│ → Log results   │                  │                             │
+│ selected tools  │ to Repeater      │ → Scans body/cookies/headers│
+│ → Apply rules   │ → Same/Any/     │ → Auto Base64/URL decode    │
+│ → Replay        │   Batch/Saved    │ → Shows editable tree       │
+│ → Compare       │                  │ → Reconstructs on Apply     │
+│ → Log results   │                  │ → Re-encodes + writes back  │
 ├─────────────────┴──────────────────┴─────────────────────────────┤
-│                    Swap Engine                                   │
+│                    Swap Engine                                    │
 │                                                                  │
 │   1. UTF-16BE char[] replacement (with null-padding)             │
 │   2. Array size prefix patching (4-byte big-endian int)          │
 │   3. TC_STRING length prefix patching (2-byte)                   │
 │   4. ASCII fallback replacement                                  │
 ├──────────────────────────────────────────────────────────────────┤
-│                Java Serialization Parser (New in v2.0)           │
+│                Java Serialization Parser (New in v2.0)            │
 │                                                                  │
 │   Full Java Object Serialization Stream Protocol decoder:        │
-│   TC_OBJECT | TC_STRING | TC_ARRAY | TC_CLASSDESC | TC_ENUM      │
-│   TC_REFERENCE | TC_BLOCKDATA | TC_PROXYCLASSDESC | Primitives   │
+│   TC_OBJECT | TC_STRING | TC_ARRAY | TC_CLASSDESC | TC_ENUM     │
+│   TC_REFERENCE | TC_BLOCKDATA | TC_PROXYCLASSDESC | Primitives  │
 │   → Structured text output with editable values                  │
 │   → Graceful degradation for unknown/exotic structures           │
 └──────────────────────────────────────────────────────────────────┘
@@ -348,7 +370,7 @@ DeserAuth handles both formats automatically.
 | `ZipException: zip END header not found` | You selected "Java" extension type - change to "Python" |
 | `NameError: global name 'X' is not defined` | Missing import - check Jython console output |
 | No entries appearing in table | Verify: rules have search values, scope is correct, START is clicked |
-| Deserialized tab not appearing | Request must contain `Content-Type: application/x-java-serialized-object` header or body starting with `AC ED 00 05` |
+| Deserialized tab not appearing | Request/response must contain serialized data in body, cookies, or headers (raw `AC ED 00 05` or Base64-encoded `rO0AB...`) |
 | Deserialized tab shows parse error | Complex or non-standard serialized objects may partially parse - check the Raw tab for full content |
 | Apply button not visible | The Apply button only appears in editable editors (Repeater request, Proxy intercept) - not in read-only views |
 | Export fails with encoding error | Fixed in v1.2 - binary bodies are sanitized before export |
@@ -357,7 +379,13 @@ DeserAuth handles both formats automatically.
 
 ## Changelog
 
-### v2.0 (Current)
+### v2.1 (Current)
+- **Cookie and header detection** - finds serialized objects in cookies (`Cookie:`, `Set-Cookie:`) and custom HTTP headers
+- **Auto encoding detection** - automatically detects Base64 and URL encoding layers around serialized data
+- **Full round-trip edit pipeline** - edit values in cookies/headers, DeserAuth reconstructs the binary, re-encodes (Base64, URL), and writes back to the exact source location
+- Source label in the Deserialized tab shows where the data came from and what encoding was used
+
+### v2.0
 - **Deserialized Message Editor Tab** - human-readable view of Java serialized objects, like JWT extension for serialization
 - Full Java Object Serialization Stream Protocol parser (TC_OBJECT, TC_STRING, TC_ARRAY, TC_CLASSDESC, TC_REFERENCE, TC_ENUM, TC_BLOCKDATA, TC_PROXYCLASSDESC, all primitives)
 - Live editing of string, numeric, and boolean values in the structured text view
