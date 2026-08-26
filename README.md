@@ -36,11 +36,19 @@ Many enterprise Java thick-client applications embed user identity (USERID, acco
 
 ---
 
-## What's New in v2.1
+## What's New in v2.2
 
-### Cookie and Header Detection with Auto Encoding
+### Bulletproof Live Editing
 
-DeserAuth now detects Java serialized objects **everywhere** -- not just in the body, but also in:
+The Deserialized tab now supports **any edit, any length, any field** without breaking the serialized stream:
+- **No Apply button needed** - just edit and send; binary reconstruction happens automatically
+- **Arbitrary-length replacements** - replace a 16-char token with a 200-char payload and the char[] array size header, stream offsets, and all downstream fields stay intact
+- **Multi-line edits** - paste large blocks of text with line breaks; the value extraction finds your field by its label prefix, not by fragile line numbers
+- **All field types** - strings, char[] arrays, integers, booleans, longs, floats, doubles - edit anything the parser can display
+
+### Cookie and Header Detection with Auto Encoding (v2.1)
+
+DeserAuth detects Java serialized objects **everywhere** -- not just in the body, but also in:
 - **Cookies** (request `Cookie:` and response `Set-Cookie:` headers)
 - **HTTP headers** (any custom header value)
 - **Base64 encoded** values are automatically decoded and re-encoded on edit
@@ -55,7 +63,7 @@ Source: Cookie "OAUTH_REQUEST" [base64 encoded]
   ...
 ```
 
-Editing and clicking Apply reconstructs the binary, re-encodes it as Base64, and writes it back into the cookie/header.
+Editing a value and sending the request reconstructs the binary, re-encodes it as Base64, and writes it back into the cookie/header automatically.
 
 ### Deserialized Message Editor Tab
 
@@ -68,9 +76,8 @@ DeserAuth adds a **"Deserialized"** tab alongside Pretty/Raw/Hex in Burp's messa
 - **Auto encoding detection** - automatically detects and handles Base64 and URL encoding layers around serialized data
 - **Full round-trip editing** - edit values in cookies/headers and DeserAuth reconstructs, re-encodes (Base64, URL), and writes back to the exact location
 - **Full protocol parser** - decodes TC_OBJECT, TC_STRING, TC_ARRAY, TC_CLASSDESC, TC_REFERENCE, TC_ENUM, TC_BLOCKDATA, TC_PROXYCLASSDESC, and all Java primitives
-- **Live editing** - modify string values, numbers, and booleans directly in the structured text view
-- **Apply button** - click Apply to reconstruct the binary and verify your changes in Raw/Pretty before sending
-- **Automatic reconstruction** - edits are also applied when switching tabs or sending the request
+- **Live editing** - modify string values, numbers, and booleans directly in the structured text view; changes are packed into the binary automatically when you send or switch tabs
+- **Robust value extraction** - handles multi-line edits, arbitrary-length replacements, and any text you type into any field without breaking the serialized stream
 - **Works everywhere** - available in Proxy (intercept + history), Repeater, Intruder, Scanner, and any extension that uses Burp's standard message editor (Stepper, Logger++, Autorize, etc.)
 
 Example output:
@@ -180,19 +187,18 @@ The Deserialized tab appears automatically alongside Pretty/Raw/Hex whenever a r
 1. **Navigate to any serialized request** in Proxy, Repeater, Intruder, or any message editor
 2. **Click the "Deserialized" tab** to see the parsed object tree
 3. **Edit values** directly in the text view - change strings (in quotes), numbers, or booleans
-4. **Click "Apply"** to reconstruct the binary and verify your changes
-5. **Switch to Raw/Pretty** to see the reconstructed serialized bytes
-6. **Send the request** - modifications are automatically applied
+4. **Send the request** - modifications are automatically packed into the binary
+5. **Switch to Raw/Pretty** to verify the reconstructed serialized bytes
 
-| Location | View | Edit | Apply |
-|---|---|---|---|
-| Proxy Intercept | Yes | Yes | Yes |
-| Proxy History | Yes | No | No |
-| Repeater | Yes | Yes | Yes |
-| Intruder | Yes | Yes | Yes |
-| Scanner | Yes | No | No |
-| Target Site Map | Yes | No | No |
-| Other Extensions (Stepper, etc.) | Yes | Depends | Depends |
+| Location | View | Edit |
+|---|---|---|
+| Proxy Intercept | Yes | Yes |
+| Proxy History | Yes | No |
+| Repeater | Yes | Yes |
+| Intruder | Yes | Yes |
+| Scanner | Yes | No |
+| Target Site Map | Yes | No |
+| Other Extensions (Stepper, etc.) | Yes | Depends |
 
 ### Passive Mode (Automatic Authorization Testing)
 
@@ -372,14 +378,20 @@ DeserAuth handles both formats automatically.
 | No entries appearing in table | Verify: rules have search values, scope is correct, START is clicked |
 | Deserialized tab not appearing | Request/response must contain serialized data in body, cookies, or headers (raw `AC ED 00 05` or Base64-encoded `rO0AB...`) |
 | Deserialized tab shows parse error | Complex or non-standard serialized objects may partially parse - check the Raw tab for full content |
-| Apply button not visible | The Apply button only appears in editable editors (Repeater request, Proxy intercept) - not in read-only views |
 | Export fails with encoding error | Fixed in v1.2 - binary bodies are sanitized before export |
 
 ---
 
 ## Changelog
 
-### v2.1 (Current)
+### v2.2 (Current)
+- **Removed Apply button** - live editing is now the only path; edit any value and send directly, no extra clicks needed
+- **Fixed char[] any-length replacement corruption** - replacing a char[] value with a string longer than the array capacity no longer corrupts the serialized stream; the array size header and all downstream offsets are correctly maintained
+- **Fixed raw byte replacement bleed** - the swap engine no longer blindly replaces raw byte matches inside already-patched UTF-16BE char[] data, which was corrupting values and shifting fields
+- **Robust multi-line editing** - inserting line breaks in the Deserialized tab no longer causes edits to be silently dropped; value extraction now searches by field prefix instead of fixed line indices
+- **Arbitrary-length value support** - type any amount of text into any field (strings, char[], integers, booleans) and it packs correctly into the binary without breaking the serialization structure
+
+### v2.1
 - **Cookie and header detection** - finds serialized objects in cookies (`Cookie:`, `Set-Cookie:`) and custom HTTP headers
 - **Auto encoding detection** - automatically detects Base64 and URL encoding layers around serialized data
 - **Full round-trip edit pipeline** - edit values in cookies/headers, DeserAuth reconstructs the binary, re-encodes (Base64, URL), and writes back to the exact source location
@@ -389,8 +401,7 @@ DeserAuth handles both formats automatically.
 - **Deserialized Message Editor Tab** - human-readable view of Java serialized objects, like JWT extension for serialization
 - Full Java Object Serialization Stream Protocol parser (TC_OBJECT, TC_STRING, TC_ARRAY, TC_CLASSDESC, TC_REFERENCE, TC_ENUM, TC_BLOCKDATA, TC_PROXYCLASSDESC, all primitives)
 - Live editing of string, numeric, and boolean values in the structured text view
-- Apply button for manual reconstruction with status feedback
-- Automatic binary reconstruction on tab switch or send
+- Automatic binary reconstruction on send or tab switch
 - Works across all Burp message editors (Proxy, Repeater, Intruder, Scanner, and third-party extensions)
 - char[] arrays displayed as decoded strings for readability
 - Graceful degradation for complex/unknown serialized structures
