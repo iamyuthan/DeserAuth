@@ -1,5 +1,5 @@
 # ==============================================================
-#  DeserAuth v2.1 - Deserialization Authorization Analyzer
+#  DeserAuth v2.2 - Deserialization Authorization Analyzer
 #  
 #  Automated Java Serialization Manipulation & Authorization
 #  Testing for Burp Suite
@@ -578,7 +578,7 @@ class JavaSerialParser(object):
         n = SerialNode("string", offset)
         n.value = value
         n.value_offset = val_offset
-        n.value_length = len(value) if isinstance(value, str) else 0
+        n.value_length = len(value) if isinstance(value, basestring) else 0
         n.encoding = "tc_string"
         n.end_offset = self.pos
         self._nh(n)
@@ -1093,7 +1093,7 @@ class JavaSerialFormatter(object):
             self._add_ed(node.value, node)
             self.lines.append("%s%s (%s) = %s" % (self._ind(indent), name, tl[tc], str(node.value)))
         else:
-            if isinstance(node.value, str):
+            if isinstance(node.value, basestring):
                 self._add_ed(node.value, node)
                 self.lines.append('%s%s = "%s"' % (self._ind(indent), name, self._esc(node.value)))
             elif node.value is not None:
@@ -1125,7 +1125,7 @@ class JavaSerialFormatter(object):
                 self.lines.append("%snull" % pfx)
             elif elem.node_type == "reference":
                 ref = elem.value
-                if ref and hasattr(ref, 'value') and isinstance(ref.value, str):
+                if ref and hasattr(ref, 'value') and isinstance(ref.value, basestring):
                     self.lines.append('%s@ref -> "%s"' % (pfx, self._esc(ref.value)))
                 elif ref and hasattr(ref, 'class_name') and ref.class_name:
                     self.lines.append('%s@ref -> %s' % (pfx, ref.class_name))
@@ -1140,14 +1140,6 @@ class JavaSerialFormatter(object):
                     self.lines.append("%s(%s)" % (pfx, elem.node_type))
         if ec > 100:
             self.lines.append("%s... %d more elements" % (self._ind(indent + 1), ec - 100))
-
-
-class ApplyDeserAction(ActionListener):
-    def __init__(self, tab):
-        self.tab = tab
-
-    def actionPerformed(self, event):
-        self.tab._apply()
 
 
 class DeserEditorTab(IMessageEditorTab):
@@ -1166,19 +1158,6 @@ class DeserEditorTab(IMessageEditorTab):
         self._scroll = JScrollPane(self._text_area)
 
         self._panel = JPanel(BorderLayout())
-        if editable:
-            btn_panel = JPanel(FlowLayout(FlowLayout.LEFT, 5, 3))
-            self._apply_btn = JButton("Apply")
-            self._apply_btn.setFont(Font("Dialog", Font.BOLD, 11))
-            self._apply_btn.addActionListener(ApplyDeserAction(self))
-            btn_panel.add(self._apply_btn)
-            self._apply_status = JLabel("")
-            self._apply_status.setFont(Font("Dialog", Font.PLAIN, 11))
-            btn_panel.add(self._apply_status)
-            self._panel.add(btn_panel, BorderLayout.NORTH)
-        else:
-            self._apply_status = None
-
         self._panel.add(self._scroll, BorderLayout.CENTER)
 
         self._original_bytes = None
@@ -1295,14 +1274,20 @@ class DeserEditorTab(IMessageEditorTab):
 
     def _reconstruct(self, current_text):
         body_str = self._original_body_str
-        current_lines = current_text.split("\n")
+        original_lines = self._original_text.split("\n")
+        print("[DeserAuth DBG] _reconstruct: %d editables, source=%s, body_str type=%s len=%d" % (
+            len(self._editables), self._source_type, type(body_str).__name__, len(body_str)))
         changes = []
         for line_idx, orig_val, node in self._editables:
-            if line_idx >= len(current_lines):
+            if line_idx >= len(original_lines):
                 continue
-            new_val = self._extract_val(current_lines[line_idx], orig_val, node)
+            orig_line = original_lines[line_idx]
+            new_val = self._extract_val_from_text(current_text, orig_line, orig_val)
             if new_val is not None and new_val != orig_val:
                 changes.append((orig_val, new_val, node))
+                print("[DeserAuth DBG]   CHANGE DETECTED: line=%d orig=%s(%s) -> new=%s(%s)" % (
+                    line_idx, repr(orig_val)[:60], type(orig_val).__name__, repr(new_val)[:60], type(new_val).__name__))
+        print("[DeserAuth DBG] _reconstruct: %d changes detected" % len(changes))
         for orig_val, new_val, node in changes:
             if isinstance(orig_val, bool):
                 if node.value_offset >= 0 and node.value_length == 1:
@@ -1363,38 +1348,65 @@ class DeserEditorTab(IMessageEditorTab):
                     except:
                         pass
                 continue
-            if isinstance(orig_val, str) and isinstance(new_val, str):
-                body_str = self._extender.apply_swap_any(body_str, str(orig_val), str(new_val))
+            if isinstance(orig_val, basestring) and isinstance(new_val, basestring):
+                search = orig_val.encode('utf-8') if isinstance(orig_val, unicode) else str(orig_val)
+                replace = new_val.encode('utf-8') if isinstance(new_val, unicode) else str(new_val)
+                old_len = len(body_str)
+                body_str = self._extender.apply_swap_any(body_str, search, replace)
+                print("[DeserAuth DBG]   apply_swap_any: search=%s replace=%s changed=%s" % (
+                    repr(search)[:60], repr(replace)[:60], str(len(body_str) != old_len)))
+        print("[DeserAuth DBG] _reconstruct: body changed=%s" % str(body_str != self._original_body_str))
         return body_str
 
-    def _extract_val(self, line, orig_val, node):
-        if isinstance(orig_val, str):
-            dq = line.find('"')
-            if dq >= 0:
-                eq = len(line) - 1
-                while eq > dq and line[eq] != '"':
-                    eq -= 1
-                if eq > dq:
-                    return self._unesc(line[dq + 1:eq])
+    def _extract_val_from_text(self, text, orig_line, orig_val):
+        if isinstance(orig_val, basestring):
+            dq = orig_line.find('"')
+            if dq < 0:
+                return None
+            prefix = orig_line[:dq + 1]
+            pos = text.find(prefix)
+            if pos < 0:
+                return None
+            val_start = pos + len(prefix)
+            i = val_start
+            while i < len(text):
+                if text[i] == '"':
+                    bs = 0
+                    j = i - 1
+                    while j >= val_start and text[j] == '\\':
+                        bs += 1
+                        j -= 1
+                    if bs % 2 == 0:
+                        raw = text[val_start:i]
+                        raw = raw.replace("\r\n", "").replace("\r", "").replace("\n", "")
+                        return self._unesc(raw)
+                i += 1
             return None
+        eq = orig_line.rfind("= ")
+        if eq < 0:
+            return None
+        prefix = orig_line[:eq + 2]
+        pos = text.find(prefix)
+        if pos < 0:
+            return None
+        val_start = pos + len(prefix)
+        val_end = text.find("\n", val_start)
+        vs = text[val_start:val_end].strip() if val_end >= 0 else text[val_start:].strip()
         if isinstance(orig_val, bool):
-            if "= true" in line:
+            if vs == "true":
                 return True
-            elif "= false" in line:
+            elif vs == "false":
                 return False
             return None
-        ei = line.rfind("= ")
-        if ei >= 0:
-            vs = line[ei + 2:].strip()
+        try:
+            if isinstance(orig_val, float):
+                return float(vs)
+            return int(vs)
+        except:
             try:
-                if isinstance(orig_val, float):
-                    return float(vs)
-                return int(vs)
+                return long(vs)
             except:
-                try:
-                    return long(vs)
-                except:
-                    pass
+                pass
         return None
 
     def _unesc(self, s):
@@ -1435,7 +1447,7 @@ class DeserEditorTab(IMessageEditorTab):
             pad = len(v) % 4
             if pad:
                 v += '=' * (4 - pad)
-            decoded = base64.b64decode(v)
+            decoded = self._helpers.bytesToString(self._helpers.base64Decode(v))
             if self._is_serial_magic(decoded):
                 return (decoded, ['base64'])
         except:
@@ -1447,7 +1459,7 @@ class DeserEditorTab(IMessageEditorTab):
                 pad = len(v) % 4
                 if pad:
                     v += '=' * (4 - pad)
-                b64_decoded = base64.b64decode(v)
+                b64_decoded = self._helpers.bytesToString(self._helpers.base64Decode(v))
                 if self._is_serial_magic(b64_decoded):
                     return (b64_decoded, ['url', 'base64'])
         except:
@@ -1526,11 +1538,11 @@ class DeserEditorTab(IMessageEditorTab):
         result = data_str
         for layer in reversed(encoding_layers):
             if layer == 'base64':
-                result = base64.b64encode(result)
+                result = self._helpers.base64Encode(self._helpers.stringToBytes(result))
                 if self._source_raw_value and not self._source_raw_value.rstrip().endswith('='):
                     result = result.rstrip('=')
             elif layer == 'url':
-                result = urllib.quote(result, safe='')
+                result = urllib.quote(str(result), safe='')
         return result
 
     def _get_source_label(self):
@@ -1564,9 +1576,20 @@ class DeserEditorTab(IMessageEditorTab):
                     updated.append(h)
             return self._helpers.buildHttpMessage(updated, mod_body)
         elif self._source_type == 'cookie':
-            new_param = self._helpers.buildParameter(
-                self._source_name, encoded, 2)
-            return self._helpers.updateParameter(self._original_bytes, new_param)
+            if self._is_request:
+                info = self._helpers.analyzeRequest(self._original_bytes)
+            else:
+                info = self._helpers.analyzeResponse(self._original_bytes)
+            headers = list(info.getHeaders())
+            body = self._original_bytes[info.getBodyOffset():]
+            updated = []
+            for h in headers:
+                hs = str(h)
+                if hs.lower().startswith("cookie:") and self._source_raw_value and self._source_raw_value in hs:
+                    updated.append(hs.replace(self._source_raw_value, encoded))
+                else:
+                    updated.append(h)
+            return self._helpers.buildHttpMessage(updated, body)
         elif self._source_type == 'set-cookie':
             if self._is_request:
                 info = self._helpers.analyzeRequest(self._original_bytes)
@@ -1599,55 +1622,6 @@ class DeserEditorTab(IMessageEditorTab):
                     updated.append(h)
             return self._helpers.buildHttpMessage(updated, body)
         return self._original_bytes
-
-    def _apply(self):
-        if not self.isModified():
-            if self._apply_status:
-                self._apply_status.setText("No changes to apply")
-                self._apply_status.setForeground(Color(100, 100, 100))
-            return
-        current_text = self._text_area.getText()
-        try:
-            mod_serial_str = self._reconstruct(current_text)
-            self._original_bytes = self._write_back(mod_serial_str)
-            self._original_body_str = mod_serial_str
-            self._original_body = self._helpers.stringToBytes(mod_serial_str)
-            self._source_raw_value = self._encode_value(mod_serial_str, self._encoding)
-            parser = JavaSerialParser(mod_serial_str)
-            nodes = parser.parse()
-            if nodes:
-                self._parsed_nodes = nodes
-                formatter = JavaSerialFormatter()
-                text, editables = formatter.format(nodes, parser.error_msg)
-                source_label = self._get_source_label()
-                if source_label:
-                    lines = text.split("\n")
-                    lines.insert(1, source_label)
-                    text = "\n".join(lines)
-                    editables = [(li + 1, v, n) for li, v, n in editables]
-                self._original_text = text
-                self._editables = editables
-                self._text_area.setText(text)
-                self._text_area.setCaretPosition(0)
-                if self._apply_status:
-                    loc = ""
-                    if self._source_type == 'cookie':
-                        loc = " (Cookie: %s)" % self._source_name
-                    elif self._source_type == 'set-cookie':
-                        loc = " (Set-Cookie: %s)" % self._source_name
-                    elif self._source_type == 'header':
-                        loc = " (Header: %s)" % self._source_name
-                    self._apply_status.setText("Applied%s - switch to Raw/Pretty to verify" % loc)
-                    self._apply_status.setForeground(Color(0, 130, 0))
-            else:
-                if self._apply_status:
-                    self._apply_status.setText("Applied but re-parse failed")
-                    self._apply_status.setForeground(Color(180, 0, 0))
-        except Exception as e:
-            if self._apply_status:
-                self._apply_status.setText("Error: %s" % str(e))
-                self._apply_status.setForeground(Color(180, 0, 0))
-            print("[!] DeserAuth apply error: %s" % str(e))
 
 
 class BurpExtender(IBurpExtender, ITab, IHttpListener, IMessageEditorController, IContextMenuFactory, IExtensionStateListener, IMessageEditorTabFactory):
@@ -1837,7 +1811,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IMessageEditorController,
         self._callbacks.registerContextMenuFactory(self)
         self._callbacks.registerMessageEditorTabFactory(self)
 
-        print("[+] DeserAuth v2.1 loaded")
+        print("[+] DeserAuth v2.2 loaded")
         print("[+] Passive analyzer + manual context menu + saved-rule context actions + deserialized editor tab")
 
     def getTabCaption(self):
@@ -2154,37 +2128,30 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IMessageEditorController,
             if idx == -1:
                 break
 
-            end_of_string = idx + len(java_search)
-            padding_end = end_of_string
-            while padding_end + 1 < len(data_str):
-                if data_str[padding_end] == chr(0x00) and data_str[padding_end + 1] == chr(0x00):
-                    padding_end += 2
-                else:
-                    break
-
-            available_space = (padding_end - idx) // 2
-
-            if len(replace_str) <= available_space:
-                java_replace = self.to_java_chars(replace_str)
-                remaining_nulls = (available_space - len(replace_str)) * 2
-                replacement = java_replace + (chr(0x00) * remaining_nulls)
-                data_str = data_str[:idx] + replacement + data_str[padding_end:]
-            else:
-                java_replace = self.to_java_chars(replace_str)
-                data_str = data_str[:idx] + java_replace + data_str[padding_end:]
-
-                array_size_offset = idx - 4
-                if array_size_offset >= 0:
-                    old_size_bytes = data_str[array_size_offset:array_size_offset + 4]
-                    old_size = (ord(old_size_bytes[0]) << 24) | (ord(old_size_bytes[1]) << 16) | (ord(old_size_bytes[2]) << 8) | ord(old_size_bytes[3])
-                    new_size = len(replace_str)
-
-                    if old_size < 10000:
-                        new_size_bytes = chr((new_size >> 24) & 0xFF) + chr((new_size >> 16) & 0xFF) + chr((new_size >> 8) & 0xFF) + chr(new_size & 0xFF)
-                        data_str = data_str[:array_size_offset] + new_size_bytes + data_str[array_size_offset + 4:]
-
-                search_pos = idx + len(java_replace)
+            array_size_offset = idx - 4
+            if array_size_offset < 0:
+                search_pos = idx + len(java_search)
                 continue
+
+            size_bytes = data_str[array_size_offset:array_size_offset + 4]
+            old_size = (ord(size_bytes[0]) << 24) | (ord(size_bytes[1]) << 16) | (ord(size_bytes[2]) << 8) | ord(size_bytes[3])
+
+            if old_size <= 0 or old_size > 10000:
+                search_pos = idx + len(java_search)
+                continue
+
+            char_data_end = idx + old_size * 2
+            java_replace = self.to_java_chars(replace_str)
+
+            if len(replace_str) <= old_size:
+                remaining_nulls = (old_size - len(replace_str)) * 2
+                replacement = java_replace + (chr(0x00) * remaining_nulls)
+                data_str = data_str[:idx] + replacement + data_str[char_data_end:]
+            else:
+                data_str = data_str[:idx] + java_replace + data_str[char_data_end:]
+                new_size = len(replace_str)
+                new_size_bytes = chr((new_size >> 24) & 0xFF) + chr((new_size >> 16) & 0xFF) + chr((new_size >> 8) & 0xFF) + chr(new_size & 0xFF)
+                data_str = data_str[:array_size_offset] + new_size_bytes + data_str[array_size_offset + 4:]
 
             search_pos = idx + len(java_replace)
 
@@ -2207,8 +2174,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IMessageEditorController,
                     start = idx + len(replace_str)
                     continue
 
-            data_str = data_str[:idx] + replace_str + data_str[idx + len(search_str):]
-            start = idx + len(replace_str)
+            start = idx + len(search_str)
 
         return data_str
 
@@ -2508,7 +2474,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IMessageEditorController,
     def _export_xml(self, filepath, log, fields):
         f = open(filepath, 'wb')
         out = '<?xml version="1.0" encoding="UTF-8"?>\n'
-        out += '<deserauth_export generator="DeserAuth v2.1" date="%s" count="%d">\n' % (time.strftime("%Y-%m-%d %H:%M:%S"), len(log))
+        out += '<deserauth_export generator="DeserAuth v2.2" date="%s" count="%d">\n' % (time.strftime("%Y-%m-%d %H:%M:%S"), len(log))
         f.write(out.encode('utf-8'))
 
         for i, entry in enumerate(log):
@@ -2552,6 +2518,32 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IMessageEditorController,
         f.write("</table></body></html>".encode('utf-8'))
         f.close()
 
+    def _try_decode_encoded(self, value):
+        try:
+            v = str(value).strip()
+            pad = len(v) % 4
+            if pad:
+                v += '=' * (4 - pad)
+            decoded = self._helpers.bytesToString(self._helpers.base64Decode(v))
+            if len(decoded) >= 4 and ord(decoded[0]) == 0xAC and ord(decoded[1]) == 0xED:
+                return decoded
+        except:
+            pass
+        return None
+
+    def _apply_rules_to_encoded(self, encoded_value):
+        decoded = self._try_decode_encoded(encoded_value)
+        if decoded is None:
+            return None
+        mod_decoded = self._helpers.bytesToString(
+            self.apply_rules(self._helpers.stringToBytes(decoded)))
+        if mod_decoded == decoded:
+            return None
+        new_encoded = self._helpers.base64Encode(self._helpers.stringToBytes(mod_decoded))
+        if not str(encoded_value).rstrip().endswith('='):
+            new_encoded = new_encoded.rstrip('=')
+        return new_encoded
+
     def processHttpMessage(self, tool_flag, is_request, message_info):
         if not self._running:
             return
@@ -2575,21 +2567,60 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IMessageEditorController,
         info = self._helpers.analyzeRequest(message_info.getHttpService(), request)
         body_offset = info.getBodyOffset()
 
-        if body_offset >= len(request):
-            return
-
-        body = request[body_offset:]
-        if len(body) < 4:
-            return
-
-        body_str = self._helpers.bytesToString(body)
-
         rules = self.get_active_rules()
         has_match = False
-        for rule in rules:
-            if rule.search in body_str or self.to_java_chars(rule.search) in body_str:
-                has_match = True
-                break
+
+        if body_offset < len(request):
+            body = request[body_offset:]
+            if len(body) >= 4:
+                body_str = self._helpers.bytesToString(body)
+                for rule in rules:
+                    if rule.search in body_str or self.to_java_chars(rule.search) in body_str:
+                        has_match = True
+                        break
+
+        if not has_match:
+            try:
+                params = info.getParameters()
+                if params:
+                    for p in params:
+                        if p.getType() == 2:
+                            cval = str(p.getValue())
+                            if cval and len(cval) > 8:
+                                decoded = self._try_decode_encoded(cval)
+                                if decoded:
+                                    for rule in rules:
+                                        if rule.search in decoded or self.to_java_chars(rule.search) in decoded:
+                                            has_match = True
+                                            break
+                        if has_match:
+                            break
+            except:
+                pass
+
+        if not has_match:
+            skip = frozenset(['content-type', 'content-length', 'host', 'user-agent',
+                              'accept', 'accept-language', 'accept-encoding',
+                              'connection', 'origin', 'referer', 'cache-control',
+                              'pragma', 'if-modified-since', 'if-none-match',
+                              'cookie', 'set-cookie'])
+            for h in list(info.getHeaders()):
+                hs = str(h)
+                colon = hs.find(':')
+                if colon <= 0:
+                    continue
+                if hs[:colon].lower() in skip:
+                    continue
+                hval = hs[colon + 1:].strip()
+                if hval and len(hval) > 8:
+                    decoded = self._try_decode_encoded(hval)
+                    if decoded:
+                        for rule in rules:
+                            if rule.search in decoded or self.to_java_chars(rule.search) in decoded:
+                                has_match = True
+                                break
+                if has_match:
+                    break
 
         if not has_match:
             return
@@ -2612,19 +2643,62 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IMessageEditorController,
     def _process_match(self, orig_request, orig_response, http_service,
                        url, method, tool_name, body_offset, host, path):
         try:
-            headers = list(self._helpers.analyzeRequest(orig_request).getHeaders())
+            info = self._helpers.analyzeRequest(orig_request)
+            headers = list(info.getHeaders())
             body = orig_request[body_offset:]
 
             new_body = self.apply_rules(body)
 
+            mod_headers = list(headers)
+            try:
+                params = info.getParameters()
+                if params:
+                    for p in params:
+                        if p.getType() == 2:
+                            cval = str(p.getValue())
+                            if cval and len(cval) > 8:
+                                new_encoded = self._apply_rules_to_encoded(cval)
+                                if new_encoded:
+                                    updated = []
+                                    for h in mod_headers:
+                                        hs = str(h)
+                                        if hs.lower().startswith("cookie:") and cval in hs:
+                                            updated.append(hs.replace(cval, new_encoded))
+                                        else:
+                                            updated.append(h)
+                                    mod_headers = updated
+            except:
+                pass
+
+            skip = frozenset(['content-type', 'content-length', 'host', 'user-agent',
+                              'accept', 'accept-language', 'accept-encoding',
+                              'connection', 'origin', 'referer', 'cache-control',
+                              'pragma', 'if-modified-since', 'if-none-match',
+                              'cookie', 'set-cookie'])
+            updated = []
+            for h in mod_headers:
+                hs = str(h)
+                colon = hs.find(':')
+                if colon > 0 and hs[:colon].lower() not in skip:
+                    hval = hs[colon + 1:].strip()
+                    if hval and len(hval) > 8:
+                        new_encoded = self._apply_rules_to_encoded(hval)
+                        if new_encoded:
+                            h = hs.replace(hval, new_encoded)
+                updated.append(h)
+            mod_headers = updated
+
             orig_body_str = self._helpers.bytesToString(body)
             new_body_str = self._helpers.bytesToString(new_body)
-            if orig_body_str == new_body_str:
+            body_changed = orig_body_str != new_body_str
+            headers_changed = mod_headers != headers
+
+            if not body_changed and not headers_changed:
                 return
 
             updated_headers = []
-            for h in headers:
-                if h.lower().startswith("content-length:"):
+            for h in mod_headers:
+                if str(h).lower().startswith("content-length:"):
                     updated_headers.append("Content-Length: " + str(len(new_body)))
                 else:
                     updated_headers.append(h)
